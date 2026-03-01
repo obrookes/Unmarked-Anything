@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -12,6 +13,13 @@ from typing import Any
 import cv2
 import numpy as np
 import torch
+
+# Allow running directly from repository root without requiring editable install.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SRC_PATH = REPO_ROOT / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+
 from depth_anything_3.api import DepthAnything3
 from ultralytics.models.sam import SAM3SemanticPredictor
 try:
