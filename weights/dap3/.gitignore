@@ -1,0 +1,3 @@
+# Ignore local DA3 checkpoint files
+*
+!.gitignore

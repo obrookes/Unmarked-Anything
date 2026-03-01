@@ -1,0 +1,85 @@
+Bootstrap: docker
+From: nvidia/cuda:12.8.0-devel-ubuntu22.04
+
+%setup
+    # No setup steps required; directories are created in %post
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+
+    # System packages
+    apt-get update && apt-get install -y \
+        git \
+        python3-pip \
+        ninja-build \
+        libgl1-mesa-glx \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender-dev \
+        wget \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Upgrade pip using the module interface to avoid shadowing issues
+    python3 -m pip install --upgrade pip
+
+    # Set CUDA architecture list for compiled extensions (gsplat, etc.)
+    # Covers: Volta (7.0), Turing (7.5), Ampere (8.0, 8.6), Ada (8.9), Hopper (9.0)
+    # Adjust to match your HPC GPU hardware for faster builds and smaller binaries
+    export TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
+
+    # Install PyTorch, torchvision, and xformers from the official CUDA 12.8 wheel index
+    # Pinned together to guarantee ABI compatibility
+    python3 -m pip install \
+        torch==2.6.0 \
+        torchvision==0.21.0 \
+        xformers==0.0.29.post3 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+    # Install remaining Python dependencies
+    python3 -m pip install \
+        gsplat \
+        ultralytics \
+        jaxtyping
+
+    # Clone and install Depth-Anything-3 in editable mode
+    mkdir -p /content
+    cd /content
+    git clone https://github.com/ByteDance-Seed/Depth-Anything-3.git
+    cd Depth-Anything-3
+    python3 -m pip install -e .
+
+%environment
+    export LC_ALL=C
+    export PATH=/usr/local/cuda/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+    # Make TORCH_CUDA_ARCH_LIST available at runtime too (for any JIT compilation)
+    export TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
+
+%runscript
+    exec /usr/bin/python3 "$@"
+
+%labels
+    Author          Your Name
+    Version         1.0.0
+    CUDA            12.8.0
+    PyTorch         2.6.0
+    xformers        0.0.29.post3
+    Base_Image      nvidia/cuda:12.8.0-devel-ubuntu22.04
+    Description     Depth-Anything-3 + Ultralytics with CUDA 12.8 support
+
+%help
+    Depth-Anything-3 container with CUDA 12.8, PyTorch 2.6.0, xformers, gsplat,
+    and Ultralytics SAM3.
+
+    Build:
+        singularity build depth-anything-3.sif depth-anything-3.def
+
+    Run a script:
+        singularity run --nv depth-anything-3.sif my_script.py
+
+    Interactive shell:
+        singularity shell --nv depth-anything-3.sif
+
+    Note: --nv is required to expose the host GPU(s) to the container.
+    Ensure your HPC host driver supports CUDA 12.8 (driver >= 570.xx).

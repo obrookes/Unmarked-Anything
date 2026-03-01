@@ -33,3 +33,12 @@ input_images*/
 src/debug_main.py
 temp*.png
 /outputs
+
+# Container artifacts (keep local, do not commit large images)
+/envs/containers/*.sif
+/envs/containers/**/*.sif
+
+# Model weights (keep local, do not commit large checkpoints)
+/weights/**/*.pt
+/weights/**/*.pth
+/weights/**/*.bin

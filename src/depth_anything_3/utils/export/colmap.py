@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import os
-import pycolmap
+#import pycolmap
 import cv2 as cv
 import numpy as np
 
