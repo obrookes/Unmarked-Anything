@@ -71,7 +71,8 @@ python apps/camera_trap/cli/dap3_cli.py \
   --input-video-dir assets/videos \
   --output-dir outputs/demo \
   --sam3-model-path weights/sam3/safari_checkpoint_hf.pt \
-  --sam3-text-prompts animal
+  --sam3-text-prompts animal \
+  --da3-batch-size 4
 ```
 
 Legacy wrapper also works: `python dap3_cli.py ...`
@@ -95,6 +96,7 @@ python apps/camera_trap/cli/dap3_cli.py \
   --sam3-model-path weights/sam3/safari_checkpoint_hf.pt \
   --sam3-text-prompts animal deer boar \
   --da3-model-id depth-anything/DA3NESTED-GIANT-LARGE \
+  --da3-batch-size 4 \
   --target-fps 1.0 \
   --sam3-mode track \
   --conf 0.25 \
@@ -111,6 +113,7 @@ python apps/camera_trap/cli/dap3_cli.py \
 | `--sam3-model-path` | path | yes | - | Path to SAM3 checkpoint (`.pt`). |
 | `--sam3-text-prompts` | list of strings | yes | - | One or more global SAM3 text prompts. |
 | `--da3-model-id` | string | no | `depth-anything/DA3NESTED-GIANT-LARGE` | DA3 pretrained model ID. |
+| `--da3-batch-size` | int | yes | - | DA3 batch size for SAM-positive sampled frames. Must be `> 0`. |
 | `--target-fps` | float | no | `1.0` | Sampling rate for processing. Must be `> 0`. |
 | `--sam3-mode` | enum | no | `track` | `track` (video tracking) or `frame` (per-frame segmentation). |
 | `--conf` | float | no | `0.25` | SAM3 confidence threshold. |

@@ -101,11 +101,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--da3-batch-size",
         type=int,
-        default=0,
-        help=(
-            "DA3 batch size for SAM-positive sampled frames. "
-            "Use 0 to auto-select based on GPU memory (recommended)."
-        ),
+        required=True,
+        help="DA3 batch size for SAM-positive sampled frames.",
     )
 
     args = parser.parse_args()
@@ -113,8 +110,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--target-fps must be > 0.")
     if args.max_videos is not None and args.max_videos <= 0:
         parser.error("--max-videos must be > 0 when provided.")
-    if args.da3_batch_size < 0:
-        parser.error("--da3-batch-size must be >= 0 (0 means auto).")
+    if args.da3_batch_size <= 0:
+        parser.error("--da3-batch-size must be > 0.")
     return args
 
 
@@ -122,24 +119,6 @@ def resolve_device(device_arg: str) -> torch.device:
     if device_arg == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device_arg)
-
-
-def resolve_da3_batch_size(device: torch.device, requested_batch_size: int) -> int:
-    if requested_batch_size > 0:
-        return int(requested_batch_size)
-
-    if device.type != "cuda" or not torch.cuda.is_available():
-        return 4
-
-    gpu_bytes = torch.cuda.get_device_properties(device).total_memory
-    gpu_gb = gpu_bytes / (1024 ** 3)
-    if gpu_gb >= 100:
-        return 24
-    if gpu_gb >= 48:
-        return 12
-    if gpu_gb >= 24:
-        return 8
-    return 4
 
 
 def parse_video_exts(raw_exts: str) -> tuple[str, ...]:
@@ -766,7 +745,7 @@ def main() -> None:
     device = resolve_device(args.device)
     use_half = args.half and device.type == "cuda"
     prompt_slugs = build_prompt_slugs(args.sam3_text_prompts)
-    da3_batch_size = resolve_da3_batch_size(device, args.da3_batch_size)
+    da3_batch_size = int(args.da3_batch_size)
 
     da3 = DepthAnything3.from_pretrained(args.da3_model_id).to(device)
     sam3_overrides = dict(

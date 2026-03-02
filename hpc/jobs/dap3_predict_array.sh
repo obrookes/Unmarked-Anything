@@ -68,10 +68,15 @@ CONF="${F[7]:-0.25}"
 USE_HALF="${F[8]:-0}"
 OVERWRITE="${F[9]:-0}"
 MAX_VIDEOS="${F[10]:-}"
-DA3_BATCH_SIZE="${F[11]:-0}"
+DA3_BATCH_SIZE="${F[11]:-}"
 
-if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" || -z "$SAM3_TEXT_PROMPTS" ]]; then
+if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" || -z "$SAM3_TEXT_PROMPTS" || -z "$DA3_BATCH_SIZE" ]]; then
   echo "Invalid manifest line (missing required fields): $LINE" >&2
+  exit 1
+fi
+if ! [[ "$DA3_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Invalid da3_batch_size '$DA3_BATCH_SIZE' in manifest line: $LINE" >&2
+  echo "da3_batch_size must be a positive integer." >&2
   exit 1
 fi
 
