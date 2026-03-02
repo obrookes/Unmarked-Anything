@@ -156,6 +156,8 @@ def build_object_masks(npz_data: np.lib.npyio.NpzFile, frame_row: dict[str, Any]
             {
                 "object_index": int(obj.get("object_index", len(objects))),
                 "track_id": obj.get("track_id"),
+                "label": obj.get("label"),
+                "confidence": obj.get("confidence"),
                 "bbox_xyxy": obj.get("bbox_xyxy"),
                 "center_xy": obj.get("center_xy"),
                 "mask": mask_arr,
@@ -164,6 +166,19 @@ def build_object_masks(npz_data: np.lib.npyio.NpzFile, frame_row: dict[str, Any]
         )
 
     return objects, missing_keys
+
+
+def _format_object_mask_means(obj_stats: list[dict[str, Any]], max_items: int = 4) -> str:
+    if not obj_stats:
+        return "none"
+    parts: list[str] = []
+    for o in obj_stats[:max_items]:
+        mean_val = o.get("mask_mean", float("nan"))
+        mean_txt = "NaN" if np.isnan(mean_val) else f"{mean_val:.4f}"
+        parts.append(f"obj{o.get('object_index', '?')}={mean_txt}")
+    if len(obj_stats) > max_items:
+        parts.append(f"+{len(obj_stats) - max_items} more")
+    return ", ".join(parts)
 
 
 def render_page(
@@ -315,11 +330,26 @@ def render_page(
             continue
 
         depth = np.asarray(npz_obj[depth_key], dtype=np.float32)
+        obj_depth_stats: list[dict[str, Any]] = []
+        if valid_objects:
+            for obj in valid_objects:
+                obj_mask = np.asarray(obj["mask"], dtype=bool)
+                vals = depth[obj_mask]
+                obj_depth_stats.append(
+                    {
+                        "object_index": obj.get("object_index"),
+                        "mask_mean": float(np.nanmean(vals)) if vals.size else float("nan"),
+                    }
+                )
         im = ax_depth.imshow(depth, cmap=depth_cmap)
         plt.colorbar(im, ax=ax_depth, fraction=0.046, pad=0.01)
-        ax_depth.set_title(
-            f"Depth | mean(mask)={rec.get('depth_mask_mean')} | center={rec.get('depth_center_value')}"
-        )
+        if obj_depth_stats:
+            depth_title = f"Depth | object mean(mask): {_format_object_mask_means(obj_depth_stats)}"
+        else:
+            depth_title = (
+                f"Depth | mean(mask)={rec.get('depth_mask_mean')} | center={rec.get('depth_center_value')}"
+            )
+        ax_depth.set_title(depth_title)
         ax_depth.axis("off")
 
     fig.suptitle(f"Processed detections: page {page + 1}/{max_page + 1} (frames {start}..{end - 1})", y=1.002)
@@ -382,12 +412,14 @@ def compute_depth_comparison_results(
     npz_data: np.lib.npyio.NpzFile,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    cmap = plt.get_cmap("tab20")
 
     for rec in analysis_records:
         frame_idx = int(rec.get("frame_index"))
 
         frame_rgb = read_video_frame(cap, frame_idx)
         union_mask = build_union_mask(npz_data, rec).astype(bool)
+        object_rows, _ = build_object_masks(npz_data, rec)
 
         if union_mask.shape != frame_rgb.shape[:2]:
             raise RuntimeError(
@@ -402,58 +434,116 @@ def compute_depth_comparison_results(
         if depth.shape != frame_rgb.shape[:2]:
             depth = cv2.resize(depth, (frame_rgb.shape[1], frame_rgb.shape[0]), interpolation=cv2.INTER_CUBIC)
 
-        bbox = rec.get("bbox_xyxy")
-        center = rec.get("center_xy")
+        object_results: list[dict[str, Any]] = []
+        for obj in object_rows:
+            obj_mask = np.asarray(obj.get("mask"), dtype=bool)
+            if obj_mask.shape != frame_rgb.shape[:2] or not np.any(obj_mask):
+                continue
 
-        if (not bbox or len(bbox) != 4) and np.any(union_mask):
-            ys, xs = np.where(union_mask)
-            bbox = [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+            bbox = obj.get("bbox_xyxy")
+            center = obj.get("center_xy")
+            if (not bbox or len(bbox) != 4):
+                ys, xs = np.where(obj_mask)
+                bbox = [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+            if (not center or len(center) != 2) and bbox and len(bbox) == 4:
+                x1, y1, x2, y2 = [int(v) for v in bbox]
+                center = [int((x1 + x2) // 2), int((y1 + y2) // 2)]
+            if not bbox or len(bbox) != 4:
+                continue
 
-        if (not center or len(center) != 2) and bbox and len(bbox) == 4:
             x1, y1, x2, y2 = [int(v) for v in bbox]
-            center = [int((x1 + x2) // 2), int((y1 + y2) // 2)]
+            x1 = max(0, min(x1, depth.shape[1] - 1))
+            x2 = max(0, min(x2, depth.shape[1] - 1))
+            y1 = max(0, min(y1, depth.shape[0] - 1))
+            y2 = max(0, min(y2, depth.shape[0] - 1))
+            if x2 < x1:
+                x1, x2 = x2, x1
+            if y2 < y1:
+                y1, y2 = y2, y1
 
-        if not bbox or len(bbox) != 4:
-            raise RuntimeError(f"Frame {frame_idx}: no bbox available and mask is empty.")
+            bbox_mask = np.zeros_like(obj_mask, dtype=bool)
+            bbox_mask[y1 : y2 + 1, x1 : x2 + 1] = True
 
-        x1, y1, x2, y2 = [int(v) for v in bbox]
-        x1 = max(0, min(x1, depth.shape[1] - 1))
-        x2 = max(0, min(x2, depth.shape[1] - 1))
-        y1 = max(0, min(y1, depth.shape[0] - 1))
-        y2 = max(0, min(y2, depth.shape[0] - 1))
-        if x2 < x1:
-            x1, x2 = x2, x1
-        if y2 < y1:
-            y1, y2 = y2, y1
-
-        bbox_mask = np.zeros_like(union_mask, dtype=bool)
-        bbox_mask[y1 : y2 + 1, x1 : x2 + 1] = True
-
-        if not center or len(center) != 2:
-            cx, cy = int((x1 + x2) // 2), int((y1 + y2) // 2)
-        else:
             cx, cy = [int(v) for v in center]
-        cx = max(0, min(cx, depth.shape[1] - 1))
-        cy = max(0, min(cy, depth.shape[0] - 1))
+            cx = max(0, min(cx, depth.shape[1] - 1))
+            cy = max(0, min(cy, depth.shape[0] - 1))
 
-        mask_vals = depth[union_mask]
-        bbox_vals = depth[bbox_mask]
-        bbox_only_vals = depth[bbox_mask & (~union_mask)]
-        center_depth = float(depth[cy, cx])
+            mask_vals = depth[obj_mask]
+            bbox_vals = depth[bbox_mask]
+            bbox_only_vals = depth[bbox_mask & (~obj_mask)]
+            center_depth = float(depth[cy, cx])
+
+            obj_idx = int(obj.get("object_index", len(object_results)))
+            object_results.append(
+                {
+                    "object_index": obj_idx,
+                    "track_id": obj.get("track_id"),
+                    "label": obj.get("label"),
+                    "color": np.array(cmap(obj_idx % 20)[:3], dtype=np.float32),
+                    "mask": obj_mask,
+                    "bbox": (x1, y1, x2, y2),
+                    "bbox_mask": bbox_mask,
+                    "center": (cx, cy),
+                    "center_depth": center_depth,
+                    "mask_pixels": int(obj_mask.sum()),
+                    "bbox_pixels": int(bbox_mask.sum()),
+                    "mask_mean": float(np.nanmean(mask_vals)) if mask_vals.size else float("nan"),
+                    "bbox_mean": float(np.nanmean(bbox_vals)) if bbox_vals.size else float("nan"),
+                    "bbox_only_mean": float(np.nanmean(bbox_only_vals)) if bbox_only_vals.size else float("nan"),
+                }
+            )
+
+        if not object_results and np.any(union_mask):
+            bbox = rec.get("bbox_xyxy")
+            center = rec.get("center_xy")
+            if (not bbox or len(bbox) != 4):
+                ys, xs = np.where(union_mask)
+                bbox = [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+            if (not center or len(center) != 2) and bbox and len(bbox) == 4:
+                x1, y1, x2, y2 = [int(v) for v in bbox]
+                center = [int((x1 + x2) // 2), int((y1 + y2) // 2)]
+            if bbox and len(bbox) == 4 and center and len(center) == 2:
+                x1, y1, x2, y2 = [int(v) for v in bbox]
+                x1 = max(0, min(x1, depth.shape[1] - 1))
+                x2 = max(0, min(x2, depth.shape[1] - 1))
+                y1 = max(0, min(y1, depth.shape[0] - 1))
+                y2 = max(0, min(y2, depth.shape[0] - 1))
+                if x2 < x1:
+                    x1, x2 = x2, x1
+                if y2 < y1:
+                    y1, y2 = y2, y1
+                bbox_mask = np.zeros_like(union_mask, dtype=bool)
+                bbox_mask[y1 : y2 + 1, x1 : x2 + 1] = True
+                cx, cy = [int(v) for v in center]
+                cx = max(0, min(cx, depth.shape[1] - 1))
+                cy = max(0, min(cy, depth.shape[0] - 1))
+                mask_vals = depth[union_mask]
+                bbox_vals = depth[bbox_mask]
+                bbox_only_vals = depth[bbox_mask & (~union_mask)]
+                object_results.append(
+                    {
+                        "object_index": 0,
+                        "track_id": None,
+                        "label": "union",
+                        "color": np.array(cmap(0)[:3], dtype=np.float32),
+                        "mask": union_mask,
+                        "bbox": (x1, y1, x2, y2),
+                        "bbox_mask": bbox_mask,
+                        "center": (cx, cy),
+                        "center_depth": float(depth[cy, cx]),
+                        "mask_pixels": int(union_mask.sum()),
+                        "bbox_pixels": int(bbox_mask.sum()),
+                        "mask_mean": float(np.nanmean(mask_vals)) if mask_vals.size else float("nan"),
+                        "bbox_mean": float(np.nanmean(bbox_vals)) if bbox_vals.size else float("nan"),
+                        "bbox_only_mean": float(np.nanmean(bbox_only_vals)) if bbox_only_vals.size else float("nan"),
+                    }
+                )
 
         result = {
             "frame_idx": frame_idx,
             "depth": depth,
-            "mask": union_mask,
-            "bbox": (x1, y1, x2, y2),
-            "bbox_mask": bbox_mask,
-            "center": (cx, cy),
-            "center_depth": center_depth,
-            "mask_pixels": int(union_mask.sum()),
-            "bbox_pixels": int(bbox_mask.sum()),
-            "mask_mean": float(np.nanmean(mask_vals)) if mask_vals.size else float("nan"),
-            "bbox_mean": float(np.nanmean(bbox_vals)) if bbox_vals.size else float("nan"),
-            "bbox_only_mean": float(np.nanmean(bbox_only_vals)) if bbox_only_vals.size else float("nan"),
+            "objects": object_results,
+            "union_mask": union_mask,
         }
         results.append(result)
 
@@ -464,17 +554,24 @@ def compute_depth_comparison_results(
 
 
 def print_depth_statistics(results: list[dict[str, Any]]) -> None:
-    print("=== DAP3-style depth statistics (mask vs bbox) ===")
+    print("=== DAP3-style depth statistics per object (mask vs bbox) ===")
     for r in results:
-        x1, y1, x2, y2 = r["bbox"]
-        cx, cy = r["center"]
-        bbox_only_txt = "NaN" if np.isnan(r["bbox_only_mean"]) else f"{r['bbox_only_mean']:.6f}"
-        print(
-            f"frame={r['frame_idx']}: bbox=({x1},{y1},{x2},{y2}) | center=({cx},{cy}) | "
-            f"mask_px={r['mask_pixels']} | bbox_px={r['bbox_pixels']} | "
-            f"mask_mean={r['mask_mean']:.6f} | bbox_mean={r['bbox_mean']:.6f} | "
-            f"center_depth={r['center_depth']:.6f} | bbox_only_mean={bbox_only_txt}"
-        )
+        frame_idx = r["frame_idx"]
+        objects = r.get("objects") or []
+        if not objects:
+            print(f"frame={frame_idx}: no objects")
+            continue
+        for o in objects:
+            x1, y1, x2, y2 = o["bbox"]
+            cx, cy = o["center"]
+            bbox_only_txt = "NaN" if np.isnan(o["bbox_only_mean"]) else f"{o['bbox_only_mean']:.6f}"
+            print(
+                f"frame={frame_idx} obj={o.get('object_index')} track_id={o.get('track_id')}: "
+                f"bbox=({x1},{y1},{x2},{y2}) | center=({cx},{cy}) | "
+                f"mask_px={o['mask_pixels']} | bbox_px={o['bbox_pixels']} | "
+                f"mask_mean={o['mask_mean']:.6f} | bbox_mean={o['bbox_mean']:.6f} | "
+                f"center_depth={o['center_depth']:.6f} | bbox_only_mean={bbox_only_txt}"
+            )
 
 
 def plot_depth_comparison(results: list[dict[str, Any]], depth_cmap: str = "inferno") -> None:
@@ -484,32 +581,39 @@ def plot_depth_comparison(results: list[dict[str, Any]], depth_cmap: str = "infe
     for i, r in enumerate(results):
         ax_depth = axes[i, 0]
         ax_dist = axes[i, 1]
-
-        x1, y1, x2, y2 = r["bbox"]
-        cx, cy = r["center"]
+        objects = r.get("objects") or []
 
         im = ax_depth.imshow(r["depth"], cmap=depth_cmap)
-        ax_depth.contour(r["mask"].astype(np.uint8), levels=[0.5], colors=["cyan"], linewidths=1.2)
-        rect = Rectangle((x1, y1), x2 - x1 + 1, y2 - y1 + 1, fill=False, edgecolor="lime", linewidth=1.5)
-        ax_depth.add_patch(rect)
-        ax_depth.plot(cx, cy, marker="o", markersize=6, color="white", markeredgecolor="black")
+        for o in objects:
+            x1, y1, x2, y2 = o["bbox"]
+            cx, cy = o["center"]
+            color = o.get("color", np.array([0.0, 1.0, 1.0], dtype=np.float32))
+            ax_depth.contour(o["mask"].astype(np.uint8), levels=[0.5], colors=[color], linewidths=1.2)
+            rect = Rectangle((x1, y1), x2 - x1 + 1, y2 - y1 + 1, fill=False, edgecolor=color, linewidth=1.5)
+            ax_depth.add_patch(rect)
+            ax_depth.plot(cx, cy, marker="o", markersize=6, color=color, markeredgecolor="black")
 
         ax_depth.set_title(
-            f"Frame {r['frame_idx']} | mask_mean={r['mask_mean']:.4f}, "
-            f"bbox_mean={r['bbox_mean']:.4f}, center={r['center_depth']:.4f}"
+            f"Frame {r['frame_idx']} | object mean(mask): {_format_object_mask_means(objects)}"
         )
         ax_depth.axis("off")
         plt.colorbar(im, ax=ax_depth, fraction=0.046, pad=0.01)
 
-        mask_vals = r["depth"][r["mask"]]
-        bbox_vals = r["depth"][r["bbox_mask"]]
-        ax_dist.hist(mask_vals[np.isfinite(mask_vals)], bins=50, alpha=0.7, label="Mask")
-        ax_dist.hist(bbox_vals[np.isfinite(bbox_vals)], bins=50, alpha=0.5, label="BBox")
-        ax_dist.axvline(r["center_depth"], color="black", linestyle="--", linewidth=1.5, label="BBox center depth")
+        for o in objects:
+            mask_vals = r["depth"][o["mask"]]
+            finite_mask_vals = mask_vals[np.isfinite(mask_vals)]
+            color = o.get("color", np.array([0.0, 1.0, 1.0], dtype=np.float32))
+            label = f"obj{o.get('object_index')} mean={o.get('mask_mean', float('nan')):.3f}"
+            if finite_mask_vals.size:
+                ax_dist.hist(finite_mask_vals, bins=50, alpha=0.45, label=label, color=color)
+                ax_dist.axvline(
+                    o["center_depth"], color=color, linestyle="--", linewidth=1.2
+                )
         ax_dist.set_title(f"Frame {r['frame_idx']} - Depth Distribution")
         ax_dist.set_xlabel("Depth value")
         ax_dist.set_ylabel("Pixel count")
-        ax_dist.legend()
+        if objects:
+            ax_dist.legend()
 
     plt.tight_layout()
     plt.show()
