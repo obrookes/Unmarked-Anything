@@ -15,7 +15,7 @@ echo "Start time: $(date)"
 echo "SLURM_JOB_ID: ${SLURM_JOB_ID}"
 
 REPO_ROOT="${REPO_ROOT:-$HOME/Unmarked-Anything}"
-INPUT_VIDEO_DIR="${INPUT_VIDEO_DIR:-$REPO_ROOT/demo/input}"
+INPUT_VIDEO_DIR="${INPUT_VIDEO_DIR:-$REPO_ROOT/assets/videos}"
 SAM3_MODEL_PATH="${SAM3_MODEL_PATH:-$REPO_ROOT/weights/sam3/safari_checkpoint_hf.pt}"
 SAM3_TEXT_PROMPTS="${SAM3_TEXT_PROMPTS:-ape}"
 TARGET_FPS="${TARGET_FPS:-1.0}"

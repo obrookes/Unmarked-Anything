@@ -45,8 +45,8 @@ Run CLI in container:
 ```bash
 singularity exec --nv envs/containers/dap3-ultralytics.sif \
   python apps/camera_trap/cli/dap3_cli.py \
-  --input-video-dir demo/input \
-  --output-dir demo/output \
+  --input-video-dir assets/videos \
+  --output-dir outputs/demo \
   --sam3-model-path weights/sam3/safari_checkpoint_hf.pt \
   --sam3-text-prompts animal
 ```
@@ -68,19 +68,19 @@ Canonical CLI:
 
 ```bash
 python apps/camera_trap/cli/dap3_cli.py \
-  --input-video-dir demo/input \
-  --output-dir demo/output \
+  --input-video-dir assets/videos \
+  --output-dir outputs/demo \
   --sam3-model-path weights/sam3/safari_checkpoint_hf.pt \
   --sam3-text-prompts animal
 ```
 
 Legacy wrapper also works: `python dap3_cli.py ...`
 
-## Demo Data
+## Sample Data
 
-- Input video: `demo/input/03290392_0_10.MP4`
-- Output directory: `demo/output/`
-- Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb) (configured for `demo/input` and `demo/output`; includes a DAP3-style selected-frame analysis cell with manual/auto frame selection, depth-map mask contour overlay, bbox/center annotations, and mask-vs-bbox depth statistics/distributions)
+- Input video: `assets/videos/03290392_0_10.MP4`
+- Suggested output directory: `outputs/demo/`
+- Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb) (configured for `assets/videos` and `outputs/demo`; includes a DAP3-style selected-frame analysis cell with manual/auto frame selection, depth-map mask contour overlay, bbox/center annotations, and mask-vs-bbox depth statistics/distributions)
 
 ## HPC Execution
 

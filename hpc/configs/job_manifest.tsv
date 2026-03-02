@@ -1,5 +1,5 @@
-# tab-separated columns:
-# job_tag	input_video_dir	sam3_model_path	sam3_text_prompts_csv	target_fps	sam3_mode	device	use_half	overwrite	max_videos
+# tab-separated columns (no job_name column; job tag is auto-generated):
+# input_video_dir	sam3_model_path	sam3_text_prompts_csv	target_fps	sam3_mode	device	use_half	overwrite	max_videos
 # prompts are comma-separated, e.g. "ape" or "ape,baboon"
 
-demo_ape	demo/input	weights/sam3/safari_checkpoint_hf.pt	ape	1.0	track	auto	0	0	
+assets/videos	weights/sam3/safari_checkpoint_hf.pt	ape	1.0	track	auto	1	0	

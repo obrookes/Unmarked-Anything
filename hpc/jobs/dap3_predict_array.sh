@@ -42,14 +42,39 @@ if (( TASK_INDEX < 0 || TASK_INDEX >= JOB_COUNT )); then
 fi
 
 LINE="${JOB_LINES[$TASK_INDEX]}"
-IFS=$'\t' read -r JOB_TAG INPUT_VIDEO_DIR SAM3_MODEL_PATH SAM3_TEXT_PROMPTS TARGET_FPS SAM3_MODE DEVICE USE_HALF OVERWRITE MAX_VIDEOS <<< "$LINE"
+IFS=$'\t' read -r C1 C2 C3 C4 C5 C6 C7 C8 C9 C10 C11 <<< "$LINE"
 
-JOB_TAG="${JOB_TAG:-job${SLURM_ARRAY_TASK_ID}}"
-TARGET_FPS="${TARGET_FPS:-1.0}"
-SAM3_MODE="${SAM3_MODE:-track}"
-DEVICE="${DEVICE:-auto}"
-USE_HALF="${USE_HALF:-0}"
-OVERWRITE="${OVERWRITE:-0}"
+# Backward compatibility:
+# - new format (preferred): 9 cols without job tag
+# - old format: 10 cols with explicit job tag in col 1
+if [[ -n "${C10:-}" ]]; then
+  JOB_TAG="${C1:-}"
+  INPUT_VIDEO_DIR="${C2:-}"
+  SAM3_MODEL_PATH="${C3:-}"
+  SAM3_TEXT_PROMPTS="${C4:-}"
+  TARGET_FPS="${C5:-1.0}"
+  SAM3_MODE="${C6:-track}"
+  DEVICE="${C7:-auto}"
+  USE_HALF="${C8:-0}"
+  OVERWRITE="${C9:-0}"
+  MAX_VIDEOS="${C10:-}"
+else
+  INPUT_VIDEO_DIR="${C1:-}"
+  SAM3_MODEL_PATH="${C2:-}"
+  SAM3_TEXT_PROMPTS="${C3:-}"
+  TARGET_FPS="${C4:-1.0}"
+  SAM3_MODE="${C5:-track}"
+  DEVICE="${C6:-auto}"
+  USE_HALF="${C7:-0}"
+  OVERWRITE="${C8:-0}"
+  MAX_VIDEOS="${C9:-}"
+  JOB_TAG=""
+fi
+
+if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" ]]; then
+  echo "Invalid manifest line (missing required fields): $LINE" >&2
+  exit 1
+fi
 
 if [[ "$INPUT_VIDEO_DIR" != /* ]]; then
   INPUT_VIDEO_DIR="$REPO_ROOT/$INPUT_VIDEO_DIR"
@@ -62,6 +87,32 @@ if [[ -z "$SAM3_TEXT_PROMPTS" ]]; then
   echo "Empty SAM3_TEXT_PROMPTS in manifest line: $LINE" >&2
   exit 1
 fi
+
+slugify() {
+  local s="$1"
+  s="${s,,}"                          # lowercase
+  s="${s// /-}"                       # spaces to dash
+  s="${s//,/-}"                       # commas to dash
+  s="$(echo "$s" | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+  printf '%s' "$s"
+}
+
+if [[ -z "$JOB_TAG" ]]; then
+  MODEL_NAME="$(basename "$SAM3_MODEL_PATH")"
+  MODEL_NAME="${MODEL_NAME%.*}"
+  MODEL_TAG="$(slugify "$MODEL_NAME")"
+  PROMPT_TAG="$(slugify "$SAM3_TEXT_PROMPTS")"
+  FPS_TAG="$(slugify "${TARGET_FPS//./p}")"
+  MODE_TAG="$(slugify "$SAM3_MODE")"
+  [[ -z "$MODEL_TAG" ]] && MODEL_TAG="sam3"
+  [[ -z "$PROMPT_TAG" ]] && PROMPT_TAG="noprompt"
+  [[ -z "$FPS_TAG" ]] && FPS_TAG="1p0"
+  [[ -z "$MODE_TAG" ]] && MODE_TAG="track"
+  JOB_TAG="${MODEL_TAG}-${PROMPT_TAG}-fps${FPS_TAG}-${MODE_TAG}"
+fi
+
+# Keep run directory names manageable.
+JOB_TAG="${JOB_TAG:0:80}"
 
 cd "$REPO_ROOT"
 

@@ -51,22 +51,22 @@ OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
 
 `hpc/configs/job_manifest.tsv` is tab-separated with columns:
 
-1. `job_tag`
-2. `input_video_dir`
-3. `sam3_model_path`
-4. `sam3_text_prompts_csv`
-5. `target_fps`
-6. `sam3_mode`
-7. `device`
-8. `use_half` (`0`/`1`)
-9. `overwrite` (`0`/`1`)
-10. `max_videos` (optional)
+1. `input_video_dir`
+2. `sam3_model_path`
+3. `sam3_text_prompts_csv`
+4. `target_fps`
+5. `sam3_mode`
+6. `device`
+7. `use_half` (`0`/`1`)
+8. `overwrite` (`0`/`1`)
+9. `max_videos` (optional)
 
 Notes:
 - Comment lines start with `#`.
 - Blank lines are ignored.
 - Prompts are comma-separated (for example `ape,baboon`).
 - Relative paths are resolved from `REPO_ROOT`.
+- `job_tag` is generated automatically from model, prompts, fps, and mode.
 
 ### 2) Submit array
 
@@ -125,7 +125,7 @@ If `<from_dir>` is omitted and `SLURM_TMPDIR` is set, it uses `SLURM_TMPDIR`.
 ## Output conventions
 
 - Single job run dir: `hpc/runs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}`
-- Array run dir: `hpc/runs/${SLURM_JOB_NAME}-${job_tag}-${SLURM_ARRAY_TASK_ID}-${SLURM_JOB_ID}`
+- Array run dir: `hpc/runs/${SLURM_JOB_NAME}-${auto_job_tag}-${SLURM_ARRAY_TASK_ID}-${SLURM_JOB_ID}`
 - Logs:
   - single: `hpc/logs/slurm/%x-%j.out|err`
   - array: `hpc/logs/slurm/%x-%A_%a.out|err`
