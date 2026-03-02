@@ -428,6 +428,7 @@ def process_video(
         "finished_at_utc": None,
         "status": "failed",
         "error": None,
+        "warnings": [],
         "frames": frame_rows,
     }
 
@@ -680,7 +681,23 @@ def process_video(
                 stream=True,
                 vid_stride=sample_interval,
             )
-            for sam_result in track_stream:
+            track_iter = iter(track_stream)
+            while True:
+                try:
+                    sam_result = next(track_iter)
+                except StopIteration:
+                    break
+                except IndexError as exc:
+                    # Some ultralytics/SAM3 builds can raise IndexError at stream tail.
+                    # Preserve already processed frames instead of failing the whole video.
+                    warning = (
+                        "SAM3 track stream ended with IndexError; "
+                        f"finalizing partial results: {type(exc).__name__}: {exc}"
+                    )
+                    video_json["warnings"].append(warning)
+                    print(f"Warning [{video_stem}]: {warning}")
+                    break
+
                 default_frame_idx = sampled_idx * sample_interval
                 dataset_frame = getattr(getattr(sam3_track, "dataset", None), "frame", None)
                 frame_idx = int(dataset_frame) - 1 if isinstance(dataset_frame, int) and dataset_frame > 0 else default_frame_idx
