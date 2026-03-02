@@ -51,7 +51,7 @@ all = ["depth-anything-3[app,gs]"]
 da3 = "depth_anything_3.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/ByteDance-Seed/Depth-Anything-3"
+Homepage = "https://github.com/obrookes/Unmarked-Anything"
 
 [tool.hatch.version]
 source = "vcs"

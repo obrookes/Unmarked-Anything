@@ -550,7 +550,7 @@ da3 auto ./unknown_input \
 
 ```bash
 # 📦 Export both NPZ and GLB formats
-da3 auto assets/examples/SOH \
+da3 auto assets/images \
     --export-format mini_npz-glb \
     --export-dir ./workspace/soh
 

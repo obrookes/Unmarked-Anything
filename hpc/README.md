@@ -54,19 +54,22 @@ OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
 1. `input_video_dir`
 2. `sam3_model_path`
 3. `sam3_text_prompts_csv`
-4. `target_fps`
-5. `sam3_mode`
-6. `device`
-7. `use_half` (`0`/`1`)
-8. `overwrite` (`0`/`1`)
-9. `max_videos` (optional)
+4. `da3_model_id`
+5. `target_fps`
+6. `sam3_mode`
+7. `device`
+8. `conf`
+9. `use_half` (`0`/`1`)
+10. `overwrite` (`0`/`1`)
+11. `max_videos` (optional)
 
 Notes:
 - Comment lines start with `#`.
 - Blank lines are ignored.
 - Prompts are comma-separated (for example `ape,baboon`).
 - Relative paths are resolved from `REPO_ROOT`.
-- `job_tag` is generated automatically from model, prompts, fps, and mode.
+- `job_tag` is generated automatically from SAM3 model, DA3 model, prompts, fps, and mode.
+- For model-based tags, only model identifiers/basenames are used (not full filesystem paths).
 
 ### 2) Submit array
 
@@ -125,7 +128,7 @@ If `<from_dir>` is omitted and `SLURM_TMPDIR` is set, it uses `SLURM_TMPDIR`.
 ## Output conventions
 
 - Single job run dir: `hpc/runs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}`
-- Array run dir: `hpc/runs/${SLURM_JOB_NAME}-${auto_job_tag}-${SLURM_ARRAY_TASK_ID}-${SLURM_JOB_ID}`
+- Array run dir: `hpc/runs/${SLURM_JOB_NAME}-${sam3basename}-${da3model}-${prompt}-fps${fps}-${mode}-${SLURM_ARRAY_TASK_ID}-${SLURM_JOB_ID}`
 - Logs:
   - single: `hpc/logs/slurm/%x-%j.out|err`
   - array: `hpc/logs/slurm/%x-%A_%a.out|err`

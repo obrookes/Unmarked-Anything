@@ -42,36 +42,33 @@ if (( TASK_INDEX < 0 || TASK_INDEX >= JOB_COUNT )); then
 fi
 
 LINE="${JOB_LINES[$TASK_INDEX]}"
-IFS=$'\t' read -r C1 C2 C3 C4 C5 C6 C7 C8 C9 C10 C11 <<< "$LINE"
+IFS=$'\t' read -r -a F <<< "$LINE"
 
-# Backward compatibility:
-# - new format (preferred): 9 cols without job tag
-# - old format: 10 cols with explicit job tag in col 1
-if [[ -n "${C10:-}" ]]; then
-  JOB_TAG="${C1:-}"
-  INPUT_VIDEO_DIR="${C2:-}"
-  SAM3_MODEL_PATH="${C3:-}"
-  SAM3_TEXT_PROMPTS="${C4:-}"
-  TARGET_FPS="${C5:-1.0}"
-  SAM3_MODE="${C6:-track}"
-  DEVICE="${C7:-auto}"
-  USE_HALF="${C8:-0}"
-  OVERWRITE="${C9:-0}"
-  MAX_VIDEOS="${C10:-}"
-else
-  INPUT_VIDEO_DIR="${C1:-}"
-  SAM3_MODEL_PATH="${C2:-}"
-  SAM3_TEXT_PROMPTS="${C3:-}"
-  TARGET_FPS="${C4:-1.0}"
-  SAM3_MODE="${C5:-track}"
-  DEVICE="${C6:-auto}"
-  USE_HALF="${C7:-0}"
-  OVERWRITE="${C8:-0}"
-  MAX_VIDEOS="${C9:-}"
-  JOB_TAG=""
-fi
+# New manifest format columns:
+# 1 input_video_dir
+# 2 sam3_model_path
+# 3 sam3_text_prompts_csv
+# 4 da3_model_id
+# 5 target_fps
+# 6 sam3_mode
+# 7 device
+# 8 conf
+# 9 use_half
+# 10 overwrite
+# 11 max_videos
+INPUT_VIDEO_DIR="${F[0]:-}"
+SAM3_MODEL_PATH="${F[1]:-}"
+SAM3_TEXT_PROMPTS="${F[2]:-}"
+DA3_MODEL_ID="${F[3]:-depth-anything/DA3NESTED-GIANT-LARGE}"
+TARGET_FPS="${F[4]:-1.0}"
+SAM3_MODE="${F[5]:-track}"
+DEVICE="${F[6]:-auto}"
+CONF="${F[7]:-0.25}"
+USE_HALF="${F[8]:-0}"
+OVERWRITE="${F[9]:-0}"
+MAX_VIDEOS="${F[10]:-}"
 
-if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" ]]; then
+if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" || -z "$SAM3_TEXT_PROMPTS" ]]; then
   echo "Invalid manifest line (missing required fields): $LINE" >&2
   exit 1
 fi
@@ -83,11 +80,6 @@ if [[ "$SAM3_MODEL_PATH" != /* ]]; then
   SAM3_MODEL_PATH="$REPO_ROOT/$SAM3_MODEL_PATH"
 fi
 
-if [[ -z "$SAM3_TEXT_PROMPTS" ]]; then
-  echo "Empty SAM3_TEXT_PROMPTS in manifest line: $LINE" >&2
-  exit 1
-fi
-
 slugify() {
   local s="$1"
   s="${s,,}"                          # lowercase
@@ -97,21 +89,22 @@ slugify() {
   printf '%s' "$s"
 }
 
-if [[ -z "$JOB_TAG" ]]; then
-  MODEL_NAME="$(basename "$SAM3_MODEL_PATH")"
-  MODEL_NAME="${MODEL_NAME%.*}"
-  MODEL_TAG="$(slugify "$MODEL_NAME")"
-  PROMPT_TAG="$(slugify "$SAM3_TEXT_PROMPTS")"
-  FPS_TAG="$(slugify "${TARGET_FPS//./p}")"
-  MODE_TAG="$(slugify "$SAM3_MODE")"
-  [[ -z "$MODEL_TAG" ]] && MODEL_TAG="sam3"
-  [[ -z "$PROMPT_TAG" ]] && PROMPT_TAG="noprompt"
-  [[ -z "$FPS_TAG" ]] && FPS_TAG="1p0"
-  [[ -z "$MODE_TAG" ]] && MODE_TAG="track"
-  JOB_TAG="${MODEL_TAG}-${PROMPT_TAG}-fps${FPS_TAG}-${MODE_TAG}"
-fi
-
-# Keep run directory names manageable.
+# Build job tag from config. Use only checkpoint file name, not full path.
+MODEL_NAME="$(basename "$SAM3_MODEL_PATH")"
+MODEL_NAME="${MODEL_NAME%.*}"
+MODEL_TAG="$(slugify "$MODEL_NAME")"
+DA3_NAME="${DA3_MODEL_ID##*/}"        # keep only final model token
+DA3_NAME="${DA3_NAME%.*}"
+DA3_TAG="$(slugify "$DA3_NAME")"
+PROMPT_TAG="$(slugify "$SAM3_TEXT_PROMPTS")"
+FPS_TAG="$(slugify "${TARGET_FPS//./p}")"
+MODE_TAG="$(slugify "$SAM3_MODE")"
+[[ -z "$MODEL_TAG" ]] && MODEL_TAG="sam3"
+[[ -z "$DA3_TAG" ]] && DA3_TAG="da3"
+[[ -z "$PROMPT_TAG" ]] && PROMPT_TAG="noprompt"
+[[ -z "$FPS_TAG" ]] && FPS_TAG="1p0"
+[[ -z "$MODE_TAG" ]] && MODE_TAG="track"
+JOB_TAG="${MODEL_TAG}-${DA3_TAG}-${PROMPT_TAG}-fps${FPS_TAG}-${MODE_TAG}"
 JOB_TAG="${JOB_TAG:0:80}"
 
 cd "$REPO_ROOT"
@@ -141,8 +134,10 @@ CMD=(
   --output-dir "$WORK_OUTPUT_DIR"
   --sam3-model-path "$SAM3_MODEL_PATH"
   --sam3-text-prompts "${PROMPTS[@]}"
+  --da3-model-id "$DA3_MODEL_ID"
   --target-fps "$TARGET_FPS"
   --sam3-mode "$SAM3_MODE"
+  --conf "$CONF"
   --device "$DEVICE"
 )
 
@@ -161,6 +156,7 @@ echo "Start time: $(date)"
 echo "SLURM_JOB_ID: ${SLURM_JOB_ID} | SLURM_ARRAY_TASK_ID: ${SLURM_ARRAY_TASK_ID}"
 echo "Manifest: $MANIFEST"
 echo "Selected line: $LINE"
+echo "Auto job tag: $JOB_TAG"
 echo "Command: ${CMD[*]}"
 
 "${CMD[@]}"

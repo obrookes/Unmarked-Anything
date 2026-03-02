@@ -42,11 +42,11 @@ From: nvidia/cuda:12.8.0-devel-ubuntu22.04
         ultralytics \
         jaxtyping
 
-    # Clone and install Depth-Anything-3 in editable mode
+    # Clone and install Unmarked-Anything in editable mode
     mkdir -p /content
     cd /content
-    git clone https://github.com/ByteDance-Seed/Depth-Anything-3.git
-    cd Depth-Anything-3
+    git clone https://github.com/obrookes/Unmarked-Anything.git
+    cd Unmarked-Anything
     python3 -m pip install -e .
 
 %environment
@@ -66,10 +66,10 @@ From: nvidia/cuda:12.8.0-devel-ubuntu22.04
     PyTorch         2.6.0
     xformers        0.0.29.post3
     Base_Image      nvidia/cuda:12.8.0-devel-ubuntu22.04
-    Description     Depth-Anything-3 + Ultralytics with CUDA 12.8 support
+    Description     Unmarked-Anything + Ultralytics with CUDA 12.8 support
 
 %help
-    Depth-Anything-3 container with CUDA 12.8, PyTorch 2.6.0, xformers, gsplat,
+    Unmarked-Anything container with CUDA 12.8, PyTorch 2.6.0, xformers, gsplat,
     and Ultralytics SAM3.
 
     Build:
