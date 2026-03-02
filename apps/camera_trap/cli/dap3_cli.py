@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -12,6 +13,10 @@ from typing import Any
 import cv2
 import numpy as np
 import torch
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
 
 # Allow running directly from repository root without requiring editable install.
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -532,6 +537,48 @@ def process_video(
         meta_cap.release()
 
     sample_interval = compute_sample_interval(video_fps, args.target_fps)
+    estimated_sampled_frames = (
+        int(math.ceil(frame_count_est / sample_interval)) if frame_count_est > 0 else None
+    )
+    estimated_sampled_batches = (
+        int(math.ceil(estimated_sampled_frames / da3_batch_size))
+        if estimated_sampled_frames is not None and estimated_sampled_frames > 0
+        else None
+    )
+    batch_progress_done = 0
+    batch_progress = (
+        tqdm(
+            total=estimated_sampled_batches,
+            desc=f"{video_stem} sampled-batches",
+            unit="batch",
+            leave=False,
+            dynamic_ncols=True,
+        )
+        if tqdm is not None
+        else None
+    )
+
+    def update_batch_progress() -> None:
+        nonlocal batch_progress_done
+        if batch_progress is None:
+            return
+        completed_batches = counts["sampled_frames"] // da3_batch_size
+        delta = completed_batches - batch_progress_done
+        if delta > 0:
+            batch_progress.update(delta)
+            batch_progress_done = completed_batches
+
+    def finalize_batch_progress() -> None:
+        nonlocal batch_progress_done
+        if batch_progress is None:
+            return
+        total_batches = int(math.ceil(counts["sampled_frames"] / da3_batch_size)) if counts["sampled_frames"] > 0 else 0
+        delta = total_batches - batch_progress_done
+        if delta > 0:
+            batch_progress.update(delta)
+            batch_progress_done = total_batches
+        batch_progress.close()
+
     video_json["video_fps"] = video_fps
     video_json["sample_interval_frames"] = int(sample_interval)
     video_json["frame_width"] = frame_width
@@ -563,6 +610,7 @@ def process_video(
                         continue
 
                     counts["sampled_frames"] += 1
+                    update_batch_progress()
                     timestamp = float(frame_idx / video_fps) if video_fps > 0 else None
                     rec = base_frame_record(frame_idx, timestamp)
                     rec["sam3_mode"] = "frame"
@@ -641,6 +689,7 @@ def process_video(
                 rec["sam3_mode"] = "track"
                 frame_start = time.perf_counter()
                 counts["sampled_frames"] += 1
+                update_batch_progress()
                 sampled_idx += 1
 
                 try:
@@ -705,6 +754,8 @@ def process_video(
     except Exception as exc:
         video_json["status"] = "failed"
         video_json["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        finalize_batch_progress()
 
     finished_at = utc_now_iso()
     video_json["finished_at_utc"] = finished_at
