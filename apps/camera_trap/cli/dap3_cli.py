@@ -806,6 +806,7 @@ def main() -> None:
         model=args.sam3_model_path,
         half=use_half,
         save=False,
+        verbose=False,
     )
     sam3_frame: SAM3SemanticPredictor | None = None
     sam3_track: Any = None
