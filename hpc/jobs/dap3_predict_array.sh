@@ -56,6 +56,7 @@ IFS=$'\t' read -r -a F <<< "$LINE"
 # 9 use_half
 # 10 overwrite
 # 11 max_videos
+# 12 da3_batch_size
 INPUT_VIDEO_DIR="${F[0]:-}"
 SAM3_MODEL_PATH="${F[1]:-}"
 SAM3_TEXT_PROMPTS="${F[2]:-}"
@@ -67,6 +68,7 @@ CONF="${F[7]:-0.25}"
 USE_HALF="${F[8]:-0}"
 OVERWRITE="${F[9]:-0}"
 MAX_VIDEOS="${F[10]:-}"
+DA3_BATCH_SIZE="${F[11]:-0}"
 
 if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" || -z "$SAM3_TEXT_PROMPTS" ]]; then
   echo "Invalid manifest line (missing required fields): $LINE" >&2
@@ -150,6 +152,7 @@ fi
 if [[ -n "${MAX_VIDEOS:-}" ]]; then
   CMD+=(--max-videos "$MAX_VIDEOS")
 fi
+CMD+=(--da3-batch-size "$DA3_BATCH_SIZE")
 
 echo "Host: $(hostname)"
 echo "Start time: $(date)"

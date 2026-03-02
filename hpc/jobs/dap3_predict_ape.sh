@@ -24,6 +24,7 @@ DEVICE="${DEVICE:-auto}"
 USE_HALF="${USE_HALF:-0}"
 OVERWRITE="${OVERWRITE:-0}"
 MAX_VIDEOS="${MAX_VIDEOS:-}"
+DA3_BATCH_SIZE="${DA3_BATCH_SIZE:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/hpc/runs}"
 USE_SCRATCH="${USE_SCRATCH:-1}"
 
@@ -73,6 +74,7 @@ fi
 if [[ -n "$MAX_VIDEOS" ]]; then
   CMD+=(--max-videos "$MAX_VIDEOS")
 fi
+CMD+=(--da3-batch-size "$DA3_BATCH_SIZE")
 
 echo "Command: ${CMD[*]}"
 "${CMD[@]}"
