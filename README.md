@@ -19,7 +19,7 @@ conda activate dap-3_py3-11
 pip install torch>=2 torchvision --index-url https://download.pytorch.org/whl/cu126
 pip install xformers
 git clone https://github.com/obrookes/Unmarked-Anything
-cd Depth-Anything-3
+cd Unmarked-Anything
 pip install -e .
 pip install gsplat
 pip install ultralytics
@@ -81,6 +81,10 @@ Legacy wrapper also works: `python dap3_cli.py ...`
 - Input video: `demo/input/03290392_0_10.MP4`
 - Output directory: `demo/output/`
 - Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb) (configured for `demo/input` and `demo/output`; includes a DAP3-style selected-frame analysis cell with manual/auto frame selection, depth-map mask contour overlay, bbox/center annotations, and mask-vs-bbox depth statistics/distributions)
+
+## HPC Execution
+
+- For SLURM/HPC job structure, batch scripts, manifests, and helper utilities, see: [`hpc/README.md`](./hpc/README.md)
 
 ## Full Command Template
 

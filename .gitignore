@@ -42,3 +42,7 @@ temp*.png
 /weights/**/*.pt
 /weights/**/*.pth
 /weights/**/*.bin
+
+# HPC runtime artifacts
+/hpc/logs/
+/hpc/runs/
