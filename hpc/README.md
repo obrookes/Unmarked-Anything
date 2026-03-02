@@ -40,7 +40,7 @@ REPO_ROOT=$HOME/Unmarked-Anything,\
 INPUT_VIDEO_DIR=$HOME/data/camera_trap/videos,\
 SAM3_MODEL_PATH=$HOME/models/safari_checkpoint_hf.pt,\
 SAM3_TEXT_PROMPTS=ape,baboon,\
-TARGET_FPS=1.0,SAM3_MODE=track,DEVICE=auto,USE_HALF=1,OVERWRITE=0,MAX_VIDEOS=,\
+TARGET_FPS=1.0,SAM3_MODE=track,DEVICE=auto,USE_HALF=1,OVERWRITE=0,MAX_VIDEOS=,DA3_BATCH_SIZE=4,\
 OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
   hpc/jobs/dap3_predict_ape.sh
 ```
@@ -62,6 +62,7 @@ OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
 9. `use_half` (`0`/`1`)
 10. `overwrite` (`0`/`1`)
 11. `max_videos` (optional)
+12. `da3_batch_size` (required, positive integer)
 
 Notes:
 - Comment lines start with `#`.
@@ -70,6 +71,7 @@ Notes:
 - Relative paths are resolved from `REPO_ROOT`.
 - `job_tag` is generated automatically from SAM3 model, DA3 model, prompts, fps, and mode.
 - For model-based tags, only model identifiers/basenames are used (not full filesystem paths).
+- `da3_batch_size` is passed through directly to the CLI and must be a positive integer.
 
 ### 2) Submit array
 

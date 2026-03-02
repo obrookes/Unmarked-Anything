@@ -24,10 +24,20 @@ DEVICE="${DEVICE:-auto}"
 USE_HALF="${USE_HALF:-0}"
 OVERWRITE="${OVERWRITE:-0}"
 MAX_VIDEOS="${MAX_VIDEOS:-}"
+DA3_BATCH_SIZE="${DA3_BATCH_SIZE:-}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/hpc/runs}"
 USE_SCRATCH="${USE_SCRATCH:-1}"
 
 mkdir -p "$REPO_ROOT/hpc/logs/slurm" "$OUTPUT_ROOT"
+
+if [[ -z "$DA3_BATCH_SIZE" ]]; then
+  echo "DA3_BATCH_SIZE is required and must be a positive integer." >&2
+  exit 1
+fi
+if ! [[ "$DA3_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Invalid DA3_BATCH_SIZE '$DA3_BATCH_SIZE'. Must be a positive integer." >&2
+  exit 1
+fi
 
 cd "$REPO_ROOT"
 
@@ -73,6 +83,7 @@ fi
 if [[ -n "$MAX_VIDEOS" ]]; then
   CMD+=(--max-videos "$MAX_VIDEOS")
 fi
+CMD+=(--da3-batch-size "$DA3_BATCH_SIZE")
 
 echo "Command: ${CMD[*]}"
 "${CMD[@]}"

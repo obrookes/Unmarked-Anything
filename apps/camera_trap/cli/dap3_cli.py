@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import math
 import os
 import re
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +13,10 @@ from typing import Any
 import cv2
 import numpy as np
 import torch
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
 
 # Allow running directly from repository root without requiring editable install.
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -99,12 +103,20 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cap on number of videos to process after sorting.",
     )
+    parser.add_argument(
+        "--da3-batch-size",
+        type=int,
+        required=True,
+        help="DA3 batch size for SAM-positive sampled frames.",
+    )
 
     args = parser.parse_args()
     if args.target_fps <= 0:
         parser.error("--target-fps must be > 0.")
     if args.max_videos is not None and args.max_videos <= 0:
         parser.error("--max-videos must be > 0 when provided.")
+    if args.da3_batch_size <= 0:
+        parser.error("--da3-batch-size must be > 0.")
     return args
 
 
@@ -221,59 +233,117 @@ def _find_prompt_idx_by_label(label: str, prompts: list[str]) -> int | None:
     return None
 
 
-def extract_prompt_masks(
+def extract_prompt_masks_and_objects(
     sam_result: Any,
     prompts: list[str],
+    prompt_slugs: list[str],
     frame_shape_hw: tuple[int, int],
-) -> list[np.ndarray]:
+) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
     height, width = frame_shape_hw
     prompt_masks = [np.zeros((height, width), dtype=bool) for _ in prompts]
+    object_rows: list[dict[str, Any]] = []
 
     if sam_result.masks is None or sam_result.masks.data is None:
-        return [mask.astype(np.uint8) for mask in prompt_masks]
+        return [mask.astype(np.uint8) for mask in prompt_masks], object_rows
 
     masks_data = sam_result.masks.data.detach().cpu().numpy()
     if masks_data.size == 0:
-        return [mask.astype(np.uint8) for mask in prompt_masks]
+        return [mask.astype(np.uint8) for mask in prompt_masks], object_rows
     det_masks = masks_data > 0
     num_dets = det_masks.shape[0]
 
+    boxes = sam_result.boxes
+    xyxy = (
+        boxes.xyxy.detach().cpu().numpy()
+        if boxes is not None and boxes.xyxy is not None
+        else np.zeros((num_dets, 4), dtype=np.float32)
+    )
+    confs = (
+        boxes.conf.detach().cpu().numpy()
+        if boxes is not None and boxes.conf is not None
+        else np.zeros((num_dets,), dtype=np.float32)
+    )
+
     cls_ids = None
-    if sam_result.boxes is not None and sam_result.boxes.cls is not None:
-        cls_ids = sam_result.boxes.cls.detach().cpu().numpy().astype(np.int64)
+    if boxes is not None and boxes.cls is not None:
+        cls_ids = boxes.cls.detach().cpu().numpy().astype(np.int64)
+    track_ids = (
+        boxes.id.detach().cpu().numpy().astype(np.int64)
+        if boxes is not None and getattr(boxes, "is_track", False) and boxes.id is not None
+        else np.full((num_dets,), -1, dtype=np.int64)
+    )
     names = sam_result.names if hasattr(sam_result, "names") else None
 
-    assigned_any = False
-    if cls_ids is not None and cls_ids.shape[0] == num_dets:
-        for det_idx in range(num_dets):
-            cls_id = int(cls_ids[det_idx])
-            prompt_idx = None
+    for det_idx in range(num_dets):
+        det_mask = det_masks[det_idx]
+        if det_mask.shape != (height, width):
+            det_mask = cv2.resize(
+                det_mask.astype(np.uint8),
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+
+        cls_id = int(cls_ids[det_idx]) if cls_ids is not None and det_idx < len(cls_ids) else -1
+        prompt_idx = None
+        if len(prompts) > 0:
             if 0 <= cls_id < len(prompts):
                 prompt_idx = cls_id
             elif isinstance(names, dict) and cls_id in names:
                 prompt_idx = _find_prompt_idx_by_label(str(names[cls_id]), prompts)
-            if prompt_idx is not None:
-                prompt_masks[prompt_idx] |= det_masks[det_idx]
-                assigned_any = True
 
-    # Fallback for unknown class mapping: put union mask into first prompt.
-    if not assigned_any and len(prompts) > 0:
-        prompt_masks[0] |= det_masks.max(axis=0)
+            # Fallback for unknown class mapping: assign to first prompt.
+            if prompt_idx is None:
+                prompt_idx = 0
+            prompt_masks[prompt_idx] |= det_mask
 
-    return [mask.astype(np.uint8) for mask in prompt_masks]
+        mask_pixels = int(det_mask.sum())
+        bbox_xyxy: list[int] | None = None
+        center_xy: list[int] | None = None
+        if mask_pixels > 0:
+            ys, xs = np.where(det_mask)
+            xmin, xmax = int(xs.min()), int(xs.max())
+            ymin, ymax = int(ys.min()), int(ys.max())
+            bbox_xyxy = [xmin, ymin, xmax, ymax]
+            center_xy = [int((xmin + xmax) // 2), int((ymin + ymax) // 2)]
+        elif det_idx < len(xyxy):
+            x1, y1, x2, y2 = [int(round(v)) for v in xyxy[det_idx].tolist()]
+            x1 = max(0, min(x1, width - 1))
+            x2 = max(0, min(x2, width - 1))
+            y1 = max(0, min(y1, height - 1))
+            y2 = max(0, min(y2, height - 1))
+            if x2 < x1:
+                x1, x2 = x2, x1
+            if y2 < y1:
+                y1, y2 = y2, y1
+            bbox_xyxy = [x1, y1, x2, y2]
+            center_xy = [int((x1 + x2) // 2), int((y1 + y2) // 2)]
+
+        label = str(cls_id)
+        if isinstance(names, dict) and cls_id in names:
+            label = str(names[cls_id])
+
+        object_rows.append(
+            {
+                "object_index": int(det_idx),
+                "track_id": int(track_ids[det_idx]) if det_idx < len(track_ids) and int(track_ids[det_idx]) >= 0 else None,
+                "prompt_index": int(prompt_idx) if prompt_idx is not None else None,
+                "prompt": prompts[prompt_idx] if prompt_idx is not None and prompt_idx < len(prompts) else None,
+                "slug": prompt_slugs[prompt_idx] if prompt_idx is not None and prompt_idx < len(prompt_slugs) else None,
+                "label": label,
+                "confidence": float(confs[det_idx]) if det_idx < len(confs) else None,
+                "bbox_xyxy": bbox_xyxy,
+                "center_xy": center_xy,
+                "mask_nonzero_pixels": mask_pixels,
+                "mask": det_mask.astype(np.uint8),
+            }
+        )
+
+    return [mask.astype(np.uint8) for mask in prompt_masks], object_rows
 
 
-def run_da3_inference_on_frame(da3: DepthAnything3, frame_bgr: np.ndarray) -> np.ndarray:
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        tmp_path = tmp.name
-    try:
-        if not cv2.imwrite(tmp_path, frame_bgr):
-            raise RuntimeError("cv2.imwrite failed for temporary DA3 input frame.")
-        depth_pred = da3.inference([tmp_path], use_ray_pose=False, infer_gs=False, export_dir=None)
-        return np.asarray(depth_pred.depth[0], dtype=np.float32)
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+def run_da3_inference_batch(da3: DepthAnything3, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
+    depth_pred = da3.inference(frames_bgr, use_ray_pose=False, infer_gs=False, export_dir=None)
+    return [np.asarray(depth_map, dtype=np.float32) for depth_map in depth_pred.depth]
 
 
 def base_frame_record(frame_index: int, timestamp_sec: float | None) -> dict[str, Any]:
@@ -290,6 +360,7 @@ def base_frame_record(frame_index: int, timestamp_sec: float | None) -> dict[str
         "center_xy": None,
         "depth_mask_mean": None,
         "depth_center_value": None,
+        "objects": [],
         "npz_keys": None,
         "timing_ms": {"sam_ms": None, "da3_ms": None, "total_ms": None},
     }
@@ -370,6 +441,7 @@ def process_video(
     da3: DepthAnything3,
     prompt_slugs: list[str],
     device: torch.device,
+    da3_batch_size: int,
 ) -> dict[str, Any]:
     video_stem = video_path.stem
     video_out_dir = output_root / video_stem
@@ -417,13 +489,133 @@ def process_video(
         "sam3_prompts": list(args.sam3_text_prompts),
         "sam3_conf": float(args.conf),
         "da3_model_id": args.da3_model_id,
+        "da3_batch_size": int(da3_batch_size),
         "device": str(device),
         "started_at_utc": started_at,
         "finished_at_utc": None,
         "status": "failed",
         "error": None,
+        "warnings": [],
         "frames": frame_rows,
     }
+
+    def finalize_record(
+        rec: dict[str, Any],
+        *,
+        frame_idx: int,
+        depth: np.ndarray,
+        union_mask_bool: np.ndarray,
+        center_xy: list[int] | None,
+        prompt_masks: list[np.ndarray],
+        object_entries: list[dict[str, Any]],
+        frame_start: float,
+        da3_ms: float,
+    ) -> None:
+        if depth.shape != union_mask_bool.shape:
+            depth = cv2.resize(
+                depth,
+                (union_mask_bool.shape[1], union_mask_bool.shape[0]),
+                interpolation=cv2.INTER_CUBIC,
+            )
+
+        depth_values = depth[union_mask_bool]
+        rec["depth_mask_mean"] = float(np.nanmean(depth_values)) if depth_values.size > 0 else None
+        if center_xy is not None:
+            cx, cy = center_xy
+            rec["depth_center_value"] = float(depth[cy, cx])
+        rec["status"] = "processed"
+        rec["timing_ms"]["da3_ms"] = da3_ms
+
+        frame_prefix = f"f{frame_idx}"
+        depth_key = f"{frame_prefix}_depth"
+        prompt_order_key = f"{frame_prefix}_prompt_order"
+        npz_arrays[depth_key] = np.asarray(depth, dtype=np.float32)
+        npz_arrays[prompt_order_key] = np.asarray(args.sam3_text_prompts, dtype=np.str_)
+
+        mask_key_rows = []
+        for prompt_idx, (prompt, prompt_slug, mask) in enumerate(
+            zip(args.sam3_text_prompts, prompt_slugs, prompt_masks)
+        ):
+            mask_key = f"{frame_prefix}_mask_{prompt_slug}"
+            npz_arrays[mask_key] = np.asarray(mask, dtype=np.uint8)
+            mask_key_rows.append(
+                {
+                    "prompt_index": int(prompt_idx),
+                    "prompt": prompt,
+                    "slug": prompt_slug,
+                    "key": mask_key,
+                }
+            )
+        object_key_rows = []
+        for obj in object_entries:
+            obj_idx = int(obj.get("object_index", len(object_key_rows)))
+            object_mask = np.asarray(obj.get("mask"), dtype=np.uint8)
+            object_mask_key = f"{frame_prefix}_obj_{obj_idx}_mask"
+            npz_arrays[object_mask_key] = object_mask
+            object_key_rows.append(
+                {
+                    "object_index": obj_idx,
+                    "track_id": obj.get("track_id"),
+                    "label": obj.get("label"),
+                    "confidence": obj.get("confidence"),
+                    "prompt_index": obj.get("prompt_index"),
+                    "prompt": obj.get("prompt"),
+                    "slug": obj.get("slug"),
+                    "bbox_xyxy": obj.get("bbox_xyxy"),
+                    "center_xy": obj.get("center_xy"),
+                    "mask_nonzero_pixels": int(obj.get("mask_nonzero_pixels") or 0),
+                    "key": object_mask_key,
+                }
+            )
+        rec["objects"] = object_key_rows
+        rec["npz_keys"] = {
+            "depth": depth_key,
+            "prompt_order": prompt_order_key,
+            "masks": mask_key_rows,
+            "objects": object_key_rows,
+        }
+        rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
+        frame_rows.append(rec)
+        counts["processed_frames"] += 1
+
+    pending_da3: list[dict[str, Any]] = []
+
+    def flush_pending_da3() -> None:
+        nonlocal pending_da3
+        if not pending_da3:
+            return
+        batch_start = time.perf_counter()
+        frames_bgr = [item["frame_bgr"] for item in pending_da3]
+        try:
+            depth_batch = run_da3_inference_batch(da3, frames_bgr)
+            if len(depth_batch) != len(pending_da3):
+                raise RuntimeError(
+                    f"DA3 returned {len(depth_batch)} depth maps for {len(pending_da3)} frames."
+                )
+            batch_ms = (time.perf_counter() - batch_start) * 1000.0
+            per_frame_da3_ms = batch_ms / max(1, len(pending_da3))
+            for item, depth in zip(pending_da3, depth_batch):
+                finalize_record(
+                    item["rec"],
+                    frame_idx=item["frame_idx"],
+                    depth=depth,
+                    union_mask_bool=item["union_mask_bool"],
+                    center_xy=item["center_xy"],
+                    prompt_masks=item["prompt_masks"],
+                    object_entries=item["object_entries"],
+                    frame_start=item["frame_start"],
+                    da3_ms=per_frame_da3_ms,
+                )
+        except Exception as exc:
+            for item in pending_da3:
+                rec = item["rec"]
+                rec["status"] = "da3_error"
+                rec["error"] = f"{type(exc).__name__}: {exc}"
+                rec["timing_ms"]["total_ms"] = (time.perf_counter() - item["frame_start"]) * 1000.0
+                frame_rows.append(rec)
+                counts["error_frames"] += 1
+        finally:
+            pending_da3 = []
 
     meta_cap = cv2.VideoCapture(str(video_path))
     try:
@@ -438,6 +630,48 @@ def process_video(
         meta_cap.release()
 
     sample_interval = compute_sample_interval(video_fps, args.target_fps)
+    estimated_sampled_frames = (
+        int(math.ceil(frame_count_est / sample_interval)) if frame_count_est > 0 else None
+    )
+    estimated_sampled_batches = (
+        int(math.ceil(estimated_sampled_frames / da3_batch_size))
+        if estimated_sampled_frames is not None and estimated_sampled_frames > 0
+        else None
+    )
+    batch_progress_done = 0
+    batch_progress = (
+        tqdm(
+            total=estimated_sampled_batches,
+            desc=f"{video_stem} sampled-batches",
+            unit="batch",
+            leave=False,
+            dynamic_ncols=True,
+        )
+        if tqdm is not None
+        else None
+    )
+
+    def update_batch_progress() -> None:
+        nonlocal batch_progress_done
+        if batch_progress is None:
+            return
+        completed_batches = counts["sampled_frames"] // da3_batch_size
+        delta = completed_batches - batch_progress_done
+        if delta > 0:
+            batch_progress.update(delta)
+            batch_progress_done = completed_batches
+
+    def finalize_batch_progress() -> None:
+        nonlocal batch_progress_done
+        if batch_progress is None:
+            return
+        total_batches = int(math.ceil(counts["sampled_frames"] / da3_batch_size)) if counts["sampled_frames"] > 0 else 0
+        delta = total_batches - batch_progress_done
+        if delta > 0:
+            batch_progress.update(delta)
+            batch_progress_done = total_batches
+        batch_progress.close()
+
     video_json["video_fps"] = video_fps
     video_json["sample_interval_frames"] = int(sample_interval)
     video_json["frame_width"] = frame_width
@@ -469,6 +703,7 @@ def process_video(
                         continue
 
                     counts["sampled_frames"] += 1
+                    update_batch_progress()
                     timestamp = float(frame_idx / video_fps) if video_fps > 0 else None
                     rec = base_frame_record(frame_idx, timestamp)
                     rec["sam3_mode"] = "frame"
@@ -479,9 +714,10 @@ def process_video(
                         sam_start = time.perf_counter()
                         sam_results = sam3_frame(source=frame_bgr, text=args.sam3_text_prompts)
                         sam_result = sam_results[0]
-                        prompt_masks = extract_prompt_masks(
+                        prompt_masks, object_entries = extract_prompt_masks_and_objects(
                             sam_result,
                             args.sam3_text_prompts,
+                            prompt_slugs,
                             frame_bgr.shape[:2],
                         )
                         rec["timing_ms"]["sam_ms"] = (time.perf_counter() - sam_start) * 1000.0
@@ -511,60 +747,20 @@ def process_video(
                         frame_idx += 1
                         continue
 
-                    try:
-                        da3_start = time.perf_counter()
-                        depth = run_da3_inference_on_frame(da3, frame_bgr)
-                        if depth.shape != frame_bgr.shape[:2]:
-                            depth = cv2.resize(
-                                depth,
-                                (frame_bgr.shape[1], frame_bgr.shape[0]),
-                                interpolation=cv2.INTER_CUBIC,
-                            )
-                        rec["timing_ms"]["da3_ms"] = (time.perf_counter() - da3_start) * 1000.0
-                    except Exception as exc:
-                        rec["status"] = "da3_error"
-                        rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
-                        rec["error"] = f"{type(exc).__name__}: {exc}"
-                        frame_rows.append(rec)
-                        counts["error_frames"] += 1
-                        frame_idx += 1
-                        continue
-
-                    depth_values = depth[union_mask_bool]
-                    rec["depth_mask_mean"] = float(np.nanmean(depth_values)) if depth_values.size > 0 else None
-                    if center_xy is not None:
-                        cx, cy = center_xy
-                        rec["depth_center_value"] = float(depth[cy, cx])
-                    rec["status"] = "processed"
-
-                    frame_prefix = f"f{frame_idx}"
-                    depth_key = f"{frame_prefix}_depth"
-                    prompt_order_key = f"{frame_prefix}_prompt_order"
-                    npz_arrays[depth_key] = np.asarray(depth, dtype=np.float32)
-                    npz_arrays[prompt_order_key] = np.asarray(args.sam3_text_prompts, dtype=np.str_)
-
-                    mask_key_rows = []
-                    for prompt_idx, (prompt, prompt_slug, mask) in enumerate(
-                        zip(args.sam3_text_prompts, prompt_slugs, prompt_masks)
-                    ):
-                        mask_key = f"{frame_prefix}_mask_{prompt_slug}"
-                        npz_arrays[mask_key] = np.asarray(mask, dtype=np.uint8)
-                        mask_key_rows.append(
-                            {
-                                "prompt_index": int(prompt_idx),
-                                "prompt": prompt,
-                                "slug": prompt_slug,
-                                "key": mask_key,
-                            }
-                        )
-                    rec["npz_keys"] = {
-                        "depth": depth_key,
-                        "prompt_order": prompt_order_key,
-                        "masks": mask_key_rows,
-                    }
-                    rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
-                    frame_rows.append(rec)
-                    counts["processed_frames"] += 1
+                    pending_da3.append(
+                        {
+                            "frame_idx": frame_idx,
+                            "rec": rec,
+                            "frame_bgr": frame_bgr,
+                            "union_mask_bool": union_mask_bool,
+                            "center_xy": center_xy,
+                            "prompt_masks": prompt_masks,
+                            "object_entries": object_entries,
+                            "frame_start": frame_start,
+                        }
+                    )
+                    if len(pending_da3) >= da3_batch_size:
+                        flush_pending_da3()
                     frame_idx += 1
             finally:
                 cap.release()
@@ -579,7 +775,23 @@ def process_video(
                 stream=True,
                 vid_stride=sample_interval,
             )
-            for sam_result in track_stream:
+            track_iter = iter(track_stream)
+            while True:
+                try:
+                    sam_result = next(track_iter)
+                except StopIteration:
+                    break
+                except IndexError as exc:
+                    # Some ultralytics/SAM3 builds can raise IndexError at stream tail.
+                    # Preserve already processed frames instead of failing the whole video.
+                    warning = (
+                        "SAM3 track stream ended with IndexError; "
+                        f"finalizing partial results: {type(exc).__name__}: {exc}"
+                    )
+                    video_json["warnings"].append(warning)
+                    print(f"Warning [{video_stem}]: {warning}")
+                    break
+
                 default_frame_idx = sampled_idx * sample_interval
                 dataset_frame = getattr(getattr(sam3_track, "dataset", None), "frame", None)
                 frame_idx = int(dataset_frame) - 1 if isinstance(dataset_frame, int) and dataset_frame > 0 else default_frame_idx
@@ -588,6 +800,7 @@ def process_video(
                 rec["sam3_mode"] = "track"
                 frame_start = time.perf_counter()
                 counts["sampled_frames"] += 1
+                update_batch_progress()
                 sampled_idx += 1
 
                 try:
@@ -601,9 +814,10 @@ def process_video(
                     if frame_bgr is None:
                         raise RuntimeError("SAM3 track result did not include orig_img.")
 
-                    prompt_masks = extract_prompt_masks(
+                    prompt_masks, object_entries = extract_prompt_masks_and_objects(
                         sam_result,
                         args.sam3_text_prompts,
+                        prompt_slugs,
                         frame_bgr.shape[:2],
                     )
                 except Exception as exc:
@@ -632,65 +846,29 @@ def process_video(
                     counts["empty_mask_frames"] += 1
                     continue
 
-                try:
-                    da3_start = time.perf_counter()
-                    depth = run_da3_inference_on_frame(da3, frame_bgr)
-                    if depth.shape != frame_bgr.shape[:2]:
-                        depth = cv2.resize(
-                            depth,
-                            (frame_bgr.shape[1], frame_bgr.shape[0]),
-                            interpolation=cv2.INTER_CUBIC,
-                        )
-                    rec["timing_ms"]["da3_ms"] = (time.perf_counter() - da3_start) * 1000.0
-                except Exception as exc:
-                    rec["status"] = "da3_error"
-                    rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
-                    rec["error"] = f"{type(exc).__name__}: {exc}"
-                    frame_rows.append(rec)
-                    counts["error_frames"] += 1
-                    continue
+                pending_da3.append(
+                    {
+                        "frame_idx": frame_idx,
+                        "rec": rec,
+                        "frame_bgr": frame_bgr,
+                        "union_mask_bool": union_mask_bool,
+                        "center_xy": center_xy,
+                        "prompt_masks": prompt_masks,
+                        "object_entries": object_entries,
+                        "frame_start": frame_start,
+                    }
+                )
+                if len(pending_da3) >= da3_batch_size:
+                    flush_pending_da3()
 
-                depth_values = depth[union_mask_bool]
-                rec["depth_mask_mean"] = float(np.nanmean(depth_values)) if depth_values.size > 0 else None
-                if center_xy is not None:
-                    cx, cy = center_xy
-                    rec["depth_center_value"] = float(depth[cy, cx])
-                rec["status"] = "processed"
-
-                frame_prefix = f"f{frame_idx}"
-                depth_key = f"{frame_prefix}_depth"
-                prompt_order_key = f"{frame_prefix}_prompt_order"
-                npz_arrays[depth_key] = np.asarray(depth, dtype=np.float32)
-                npz_arrays[prompt_order_key] = np.asarray(args.sam3_text_prompts, dtype=np.str_)
-
-                mask_key_rows = []
-                for prompt_idx, (prompt, prompt_slug, mask) in enumerate(
-                    zip(args.sam3_text_prompts, prompt_slugs, prompt_masks)
-                ):
-                    mask_key = f"{frame_prefix}_mask_{prompt_slug}"
-                    npz_arrays[mask_key] = np.asarray(mask, dtype=np.uint8)
-                    mask_key_rows.append(
-                        {
-                            "prompt_index": int(prompt_idx),
-                            "prompt": prompt,
-                            "slug": prompt_slug,
-                            "key": mask_key,
-                        }
-                    )
-                rec["npz_keys"] = {
-                    "depth": depth_key,
-                    "prompt_order": prompt_order_key,
-                    "masks": mask_key_rows,
-                }
-                rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
-                frame_rows.append(rec)
-                counts["processed_frames"] += 1
-
+        flush_pending_da3()
         write_npz_atomic(npz_path, npz_arrays)
         video_json["status"] = "success"
     except Exception as exc:
         video_json["status"] = "failed"
         video_json["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        finalize_batch_progress()
 
     finished_at = utc_now_iso()
     video_json["finished_at_utc"] = finished_at
@@ -709,7 +887,6 @@ def process_video(
         "counts": counts,
         "duration_sec": float(duration_sec),
     }
-
 
 def main() -> None:
     args = parse_args()
@@ -732,6 +909,7 @@ def main() -> None:
     device = resolve_device(args.device)
     use_half = args.half and device.type == "cuda"
     prompt_slugs = build_prompt_slugs(args.sam3_text_prompts)
+    da3_batch_size = int(args.da3_batch_size)
 
     da3 = DepthAnything3.from_pretrained(args.da3_model_id).to(device)
     sam3_overrides = dict(
@@ -741,6 +919,7 @@ def main() -> None:
         model=args.sam3_model_path,
         half=use_half,
         save=False,
+        verbose=False,
     )
     sam3_frame: SAM3SemanticPredictor | None = None
     sam3_track: Any = None
@@ -765,6 +944,7 @@ def main() -> None:
         "sam3_model_path": str(Path(args.sam3_model_path).resolve()),
         "sam3_prompts": list(args.sam3_text_prompts),
         "da3_model_id": args.da3_model_id,
+        "da3_batch_size": int(da3_batch_size),
         "device": str(device),
         "overwrite": bool(args.overwrite),
         "max_videos": args.max_videos,
@@ -789,6 +969,7 @@ def main() -> None:
             da3=da3,
             prompt_slugs=prompt_slugs,
             device=device,
+            da3_batch_size=da3_batch_size,
         )
         manifest["videos"].append(entry)
         update_and_write_manifest(manifest_path, manifest)
