@@ -233,46 +233,112 @@ def _find_prompt_idx_by_label(label: str, prompts: list[str]) -> int | None:
     return None
 
 
-def extract_prompt_masks(
+def extract_prompt_masks_and_objects(
     sam_result: Any,
     prompts: list[str],
+    prompt_slugs: list[str],
     frame_shape_hw: tuple[int, int],
-) -> list[np.ndarray]:
+) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
     height, width = frame_shape_hw
     prompt_masks = [np.zeros((height, width), dtype=bool) for _ in prompts]
+    object_rows: list[dict[str, Any]] = []
 
     if sam_result.masks is None or sam_result.masks.data is None:
-        return [mask.astype(np.uint8) for mask in prompt_masks]
+        return [mask.astype(np.uint8) for mask in prompt_masks], object_rows
 
     masks_data = sam_result.masks.data.detach().cpu().numpy()
     if masks_data.size == 0:
-        return [mask.astype(np.uint8) for mask in prompt_masks]
+        return [mask.astype(np.uint8) for mask in prompt_masks], object_rows
     det_masks = masks_data > 0
     num_dets = det_masks.shape[0]
 
+    boxes = sam_result.boxes
+    xyxy = (
+        boxes.xyxy.detach().cpu().numpy()
+        if boxes is not None and boxes.xyxy is not None
+        else np.zeros((num_dets, 4), dtype=np.float32)
+    )
+    confs = (
+        boxes.conf.detach().cpu().numpy()
+        if boxes is not None and boxes.conf is not None
+        else np.zeros((num_dets,), dtype=np.float32)
+    )
+
     cls_ids = None
-    if sam_result.boxes is not None and sam_result.boxes.cls is not None:
-        cls_ids = sam_result.boxes.cls.detach().cpu().numpy().astype(np.int64)
+    if boxes is not None and boxes.cls is not None:
+        cls_ids = boxes.cls.detach().cpu().numpy().astype(np.int64)
+    track_ids = (
+        boxes.id.detach().cpu().numpy().astype(np.int64)
+        if boxes is not None and getattr(boxes, "is_track", False) and boxes.id is not None
+        else np.full((num_dets,), -1, dtype=np.int64)
+    )
     names = sam_result.names if hasattr(sam_result, "names") else None
 
-    assigned_any = False
-    if cls_ids is not None and cls_ids.shape[0] == num_dets:
-        for det_idx in range(num_dets):
-            cls_id = int(cls_ids[det_idx])
-            prompt_idx = None
+    for det_idx in range(num_dets):
+        det_mask = det_masks[det_idx]
+        if det_mask.shape != (height, width):
+            det_mask = cv2.resize(
+                det_mask.astype(np.uint8),
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+
+        cls_id = int(cls_ids[det_idx]) if cls_ids is not None and det_idx < len(cls_ids) else -1
+        prompt_idx = None
+        if len(prompts) > 0:
             if 0 <= cls_id < len(prompts):
                 prompt_idx = cls_id
             elif isinstance(names, dict) and cls_id in names:
                 prompt_idx = _find_prompt_idx_by_label(str(names[cls_id]), prompts)
-            if prompt_idx is not None:
-                prompt_masks[prompt_idx] |= det_masks[det_idx]
-                assigned_any = True
 
-    # Fallback for unknown class mapping: put union mask into first prompt.
-    if not assigned_any and len(prompts) > 0:
-        prompt_masks[0] |= det_masks.max(axis=0)
+            # Fallback for unknown class mapping: assign to first prompt.
+            if prompt_idx is None:
+                prompt_idx = 0
+            prompt_masks[prompt_idx] |= det_mask
 
-    return [mask.astype(np.uint8) for mask in prompt_masks]
+        mask_pixels = int(det_mask.sum())
+        bbox_xyxy: list[int] | None = None
+        center_xy: list[int] | None = None
+        if mask_pixels > 0:
+            ys, xs = np.where(det_mask)
+            xmin, xmax = int(xs.min()), int(xs.max())
+            ymin, ymax = int(ys.min()), int(ys.max())
+            bbox_xyxy = [xmin, ymin, xmax, ymax]
+            center_xy = [int((xmin + xmax) // 2), int((ymin + ymax) // 2)]
+        elif det_idx < len(xyxy):
+            x1, y1, x2, y2 = [int(round(v)) for v in xyxy[det_idx].tolist()]
+            x1 = max(0, min(x1, width - 1))
+            x2 = max(0, min(x2, width - 1))
+            y1 = max(0, min(y1, height - 1))
+            y2 = max(0, min(y2, height - 1))
+            if x2 < x1:
+                x1, x2 = x2, x1
+            if y2 < y1:
+                y1, y2 = y2, y1
+            bbox_xyxy = [x1, y1, x2, y2]
+            center_xy = [int((x1 + x2) // 2), int((y1 + y2) // 2)]
+
+        label = str(cls_id)
+        if isinstance(names, dict) and cls_id in names:
+            label = str(names[cls_id])
+
+        object_rows.append(
+            {
+                "object_index": int(det_idx),
+                "track_id": int(track_ids[det_idx]) if det_idx < len(track_ids) and int(track_ids[det_idx]) >= 0 else None,
+                "prompt_index": int(prompt_idx) if prompt_idx is not None else None,
+                "prompt": prompts[prompt_idx] if prompt_idx is not None and prompt_idx < len(prompts) else None,
+                "slug": prompt_slugs[prompt_idx] if prompt_idx is not None and prompt_idx < len(prompt_slugs) else None,
+                "label": label,
+                "confidence": float(confs[det_idx]) if det_idx < len(confs) else None,
+                "bbox_xyxy": bbox_xyxy,
+                "center_xy": center_xy,
+                "mask_nonzero_pixels": mask_pixels,
+                "mask": det_mask.astype(np.uint8),
+            }
+        )
+
+    return [mask.astype(np.uint8) for mask in prompt_masks], object_rows
 
 
 def run_da3_inference_batch(da3: DepthAnything3, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
@@ -294,6 +360,7 @@ def base_frame_record(frame_index: int, timestamp_sec: float | None) -> dict[str
         "center_xy": None,
         "depth_mask_mean": None,
         "depth_center_value": None,
+        "objects": [],
         "npz_keys": None,
         "timing_ms": {"sam_ms": None, "da3_ms": None, "total_ms": None},
     }
@@ -440,6 +507,7 @@ def process_video(
         union_mask_bool: np.ndarray,
         center_xy: list[int] | None,
         prompt_masks: list[np.ndarray],
+        object_entries: list[dict[str, Any]],
         frame_start: float,
         da3_ms: float,
     ) -> None:
@@ -478,10 +546,33 @@ def process_video(
                     "key": mask_key,
                 }
             )
+        object_key_rows = []
+        for obj in object_entries:
+            obj_idx = int(obj.get("object_index", len(object_key_rows)))
+            object_mask = np.asarray(obj.get("mask"), dtype=np.uint8)
+            object_mask_key = f"{frame_prefix}_obj_{obj_idx}_mask"
+            npz_arrays[object_mask_key] = object_mask
+            object_key_rows.append(
+                {
+                    "object_index": obj_idx,
+                    "track_id": obj.get("track_id"),
+                    "label": obj.get("label"),
+                    "confidence": obj.get("confidence"),
+                    "prompt_index": obj.get("prompt_index"),
+                    "prompt": obj.get("prompt"),
+                    "slug": obj.get("slug"),
+                    "bbox_xyxy": obj.get("bbox_xyxy"),
+                    "center_xy": obj.get("center_xy"),
+                    "mask_nonzero_pixels": int(obj.get("mask_nonzero_pixels") or 0),
+                    "key": object_mask_key,
+                }
+            )
+        rec["objects"] = object_key_rows
         rec["npz_keys"] = {
             "depth": depth_key,
             "prompt_order": prompt_order_key,
             "masks": mask_key_rows,
+            "objects": object_key_rows,
         }
         rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
         frame_rows.append(rec)
@@ -511,6 +602,7 @@ def process_video(
                     union_mask_bool=item["union_mask_bool"],
                     center_xy=item["center_xy"],
                     prompt_masks=item["prompt_masks"],
+                    object_entries=item["object_entries"],
                     frame_start=item["frame_start"],
                     da3_ms=per_frame_da3_ms,
                 )
@@ -622,9 +714,10 @@ def process_video(
                         sam_start = time.perf_counter()
                         sam_results = sam3_frame(source=frame_bgr, text=args.sam3_text_prompts)
                         sam_result = sam_results[0]
-                        prompt_masks = extract_prompt_masks(
+                        prompt_masks, object_entries = extract_prompt_masks_and_objects(
                             sam_result,
                             args.sam3_text_prompts,
+                            prompt_slugs,
                             frame_bgr.shape[:2],
                         )
                         rec["timing_ms"]["sam_ms"] = (time.perf_counter() - sam_start) * 1000.0
@@ -662,6 +755,7 @@ def process_video(
                             "union_mask_bool": union_mask_bool,
                             "center_xy": center_xy,
                             "prompt_masks": prompt_masks,
+                            "object_entries": object_entries,
                             "frame_start": frame_start,
                         }
                     )
@@ -720,9 +814,10 @@ def process_video(
                     if frame_bgr is None:
                         raise RuntimeError("SAM3 track result did not include orig_img.")
 
-                    prompt_masks = extract_prompt_masks(
+                    prompt_masks, object_entries = extract_prompt_masks_and_objects(
                         sam_result,
                         args.sam3_text_prompts,
+                        prompt_slugs,
                         frame_bgr.shape[:2],
                     )
                 except Exception as exc:
@@ -759,6 +854,7 @@ def process_video(
                         "union_mask_bool": union_mask_bool,
                         "center_xy": center_xy,
                         "prompt_masks": prompt_masks,
+                        "object_entries": object_entries,
                         "frame_start": frame_start,
                     }
                 )

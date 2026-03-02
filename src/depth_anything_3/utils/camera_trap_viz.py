@@ -138,6 +138,34 @@ def build_union_mask(npz_data: np.lib.npyio.NpzFile, frame_row: dict[str, Any]) 
     return union_mask
 
 
+def build_object_masks(npz_data: np.lib.npyio.NpzFile, frame_row: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    npz_keys = frame_row.get("npz_keys") or {}
+    object_entries = npz_keys.get("objects") or frame_row.get("objects") or []
+    objects: list[dict[str, Any]] = []
+    missing_keys: list[str] = []
+
+    for obj in object_entries:
+        key = obj.get("key")
+        if not key:
+            continue
+        if key not in npz_data:
+            missing_keys.append(str(key))
+            continue
+        mask_arr = np.asarray(npz_data[key]).astype(bool)
+        objects.append(
+            {
+                "object_index": int(obj.get("object_index", len(objects))),
+                "track_id": obj.get("track_id"),
+                "bbox_xyxy": obj.get("bbox_xyxy"),
+                "center_xy": obj.get("center_xy"),
+                "mask": mask_arr,
+                "mask_nonzero_pixels": int(obj.get("mask_nonzero_pixels") or int(mask_arr.sum())),
+            }
+        )
+
+    return objects, missing_keys
+
+
 def render_page(
     records: list[dict[str, Any]],
     cap_obj: cv2.VideoCapture,
@@ -187,6 +215,11 @@ def render_page(
         except Exception as e:
             warnings.append(f"Frame {frame_idx}: mask missing/invalid ({e})")
             union_mask = np.zeros(frame_rgb.shape[:2], dtype=bool)
+        object_rows, missing_object_keys = build_object_masks(npz_obj, rec)
+        if missing_object_keys:
+            warnings.append(
+                f"Frame {frame_idx}: missing object mask keys: {missing_object_keys[:6]}"
+            )
 
         if union_mask.shape != frame_rgb.shape[:2]:
             warnings.append(
@@ -195,29 +228,82 @@ def render_page(
             union_mask = np.zeros(frame_rgb.shape[:2], dtype=bool)
 
         overlay = frame_rgb.astype(np.float32) / 255.0
-        overlay_color = np.array([0.0, 1.0, 1.0], dtype=np.float32)
-        if np.any(union_mask):
-            overlay[union_mask] = (1.0 - overlay_alpha) * overlay[union_mask] + overlay_alpha * overlay_color
+        cmap = plt.get_cmap("tab20")
+        valid_objects: list[dict[str, Any]] = []
+        for obj in object_rows:
+            obj_mask = np.asarray(obj["mask"], dtype=bool)
+            if obj_mask.shape != frame_rgb.shape[:2]:
+                warnings.append(
+                    f"Frame {frame_idx}: object mask/frame shape mismatch {obj_mask.shape} vs {frame_rgb.shape[:2]}"
+                )
+                continue
+            if not np.any(obj_mask):
+                continue
+            valid_objects.append(obj)
+
+        if valid_objects:
+            for obj in valid_objects:
+                color = np.array(cmap(int(obj["object_index"]) % 20)[:3], dtype=np.float32)
+                obj_mask = np.asarray(obj["mask"], dtype=bool)
+                overlay[obj_mask] = (1.0 - overlay_alpha) * overlay[obj_mask] + overlay_alpha * color
+        else:
+            overlay_color = np.array([0.0, 1.0, 1.0], dtype=np.float32)
+            if np.any(union_mask):
+                overlay[union_mask] = (1.0 - overlay_alpha) * overlay[union_mask] + overlay_alpha * overlay_color
 
         ax_overlay.imshow(overlay)
         if show_bbox_and_center:
-            bbox = rec.get("bbox_xyxy")
-            if bbox and len(bbox) == 4:
-                x1, y1, x2, y2 = bbox
-                ax_overlay.add_patch(
-                    Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="lime", linewidth=1.5)
-                )
-            center = rec.get("center_xy")
-            if center and len(center) == 2:
-                ax_overlay.plot(
-                    center[0], center[1], marker="o", markersize=5, color="yellow", markeredgecolor="black"
-                )
+            if valid_objects:
+                for obj in valid_objects:
+                    color = np.array(cmap(int(obj["object_index"]) % 20)[:3], dtype=np.float32)
+                    bbox = obj.get("bbox_xyxy")
+                    center = obj.get("center_xy")
+                    if (not bbox or len(bbox) != 4) and np.any(obj["mask"]):
+                        ys, xs = np.where(np.asarray(obj["mask"], dtype=bool))
+                        bbox = [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+                    if (not center or len(center) != 2) and bbox and len(bbox) == 4:
+                        x1, y1, x2, y2 = [int(v) for v in bbox]
+                        center = [int((x1 + x2) // 2), int((y1 + y2) // 2)]
+                    if bbox and len(bbox) == 4:
+                        x1, y1, x2, y2 = [int(v) for v in bbox]
+                        ax_overlay.add_patch(
+                            Rectangle(
+                                (x1, y1),
+                                x2 - x1,
+                                y2 - y1,
+                                fill=False,
+                                edgecolor=color,
+                                linewidth=1.8,
+                            )
+                        )
+                    if center and len(center) == 2:
+                        ax_overlay.plot(
+                            int(center[0]),
+                            int(center[1]),
+                            marker="o",
+                            markersize=5,
+                            color=color,
+                            markeredgecolor="black",
+                        )
+            else:
+                bbox = rec.get("bbox_xyxy")
+                if bbox and len(bbox) == 4:
+                    x1, y1, x2, y2 = bbox
+                    ax_overlay.add_patch(
+                        Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="lime", linewidth=1.5)
+                    )
+                center = rec.get("center_xy")
+                if center and len(center) == 2:
+                    ax_overlay.plot(
+                        center[0], center[1], marker="o", markersize=5, color="yellow", markeredgecolor="black"
+                    )
 
         ts = rec.get("timestamp_sec")
         ts_txt = f"{ts:.2f}s" if isinstance(ts, (int, float)) else "n/a"
+        object_count = len(valid_objects)
         ax_overlay.set_title(
             f"Frame {frame_idx} @ {ts_txt} | mask_px={rec.get('mask_nonzero_pixels', 0)} "
-            f"| area={rec.get('mask_area_fraction', 0.0):.4f}"
+            f"| area={rec.get('mask_area_fraction', 0.0):.4f} | objects={object_count}"
         )
         ax_overlay.axis("off")
 
