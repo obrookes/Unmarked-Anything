@@ -46,3 +46,6 @@ temp*.png
 # HPC runtime artifacts
 /hpc/logs/
 /hpc/runs/
+
+# Local prompt backlog (private notes)
+/notes/todo-prompts.md
