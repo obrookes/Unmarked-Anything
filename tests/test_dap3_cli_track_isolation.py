@@ -160,9 +160,22 @@ def test_validate_track_state_num_frames_mismatch_raises() -> None:
         dap3_cli.validate_track_state_num_frames(
             sam3_track=predictor,
             video_stem="video_a",
+            expected_total_frames=10,
             expected_sampled_frames=10,
             sample_interval=24,
         )
+
+
+def test_validate_track_state_num_frames_matches_total_frames() -> None:
+    predictor = types.SimpleNamespace(inference_state={"num_frames": 1454})
+    out = dap3_cli.validate_track_state_num_frames(
+        sam3_track=predictor,
+        video_stem="video_a",
+        expected_total_frames=1454,
+        expected_sampled_frames=61,
+        sample_interval=24,
+    )
+    assert out == 1454
 
 
 def test_handle_track_stream_index_error_warn_and_finalize() -> None:

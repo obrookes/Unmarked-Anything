@@ -270,6 +270,7 @@ def validate_track_state_num_frames(
     *,
     sam3_track: Any,
     video_stem: str,
+    expected_total_frames: int | None,
     expected_sampled_frames: int | None,
     sample_interval: int,
 ) -> int | None:
@@ -279,14 +280,17 @@ def validate_track_state_num_frames(
         if isinstance(inference_state, dict) and inference_state.get("num_frames") is not None
         else None
     )
+    # SAM3VideoSemanticPredictor tracks full video length (`dataset.frames`), not sampled frame count.
+    # Validate against total input frames and keep sampled-frame info for diagnostics only.
     if (
-        expected_sampled_frames is not None
+        expected_total_frames is not None
         and num_frames is not None
-        and abs(num_frames - expected_sampled_frames) > 1
+        and abs(num_frames - expected_total_frames) > 1
     ):
         raise RuntimeError(
             "SAM3 track predictor state mismatch for video "
             f"'{video_stem}': inference_state.num_frames={num_frames}, "
+            f"expected_total_frames={expected_total_frames}, "
             f"expected_sampled_frames={expected_sampled_frames}, sample_interval={sample_interval}. "
             "This usually indicates cross-video state leakage."
         )
@@ -1002,6 +1006,7 @@ def process_video(
                     video_json["sam3_tracker_num_frames"] = validate_track_state_num_frames(
                         sam3_track=sam3_track,
                         video_stem=video_stem,
+                        expected_total_frames=frame_count_est if frame_count_est > 0 else None,
                         expected_sampled_frames=estimated_sampled_frames,
                         sample_interval=sample_interval,
                     )
