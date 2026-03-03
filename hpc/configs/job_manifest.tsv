@@ -1,5 +1,5 @@
-# input_video_dir	sam3_model_path	sam3_text_prompts_csv	da3_model_id	target_fps	sam3_mode	device	conf	use_half	overwrite	max_videos	da3_batch_size
-assets/videos	weights/sam3/sam3.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	1.0	track	auto	0.25	1	0	1	48
-assets/videos	weights/sam3/sam3-safari-pos.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	1.0	track	auto	0.25	1	0	1	48
-assets/videos	weights/sam3/sam3-safari-neg.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	1.0	track	auto	0.25	1	0	1	48
-assets/videos	weights/sam3/sam3-safari-neg-parents.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	1.0	track	auto	0.25	1	0	1	48
+input_video_dir	sam3_model_path	sam3_text_prompts_csv	da3_model_id	target_fps	sam3_mode	device	conf	use_half	overwrite	max_videos	da3_batch_size	sam3_track_isolation	sam3_track_tail_policy
+#assets/videos	weights/sam3/sam3.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize
+#assets/videos	weights/sam3/sam3-safari-pos.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize
+#assets/videos	weights/sam3/sam3-safari-neg.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize
+#assets/videos	weights/sam3/sam3-safari-neg-parents.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize

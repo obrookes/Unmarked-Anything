@@ -57,6 +57,8 @@ IFS=$'\t' read -r -a F <<< "$LINE"
 # 10 overwrite
 # 11 max_videos
 # 12 da3_batch_size
+# 13 sam3_track_isolation (optional: recreate|reset|both)
+# 14 sam3_track_tail_policy (optional: warn_and_finalize|fail_fast)
 INPUT_VIDEO_DIR="${F[0]:-}"
 SAM3_MODEL_PATH="${F[1]:-}"
 SAM3_TEXT_PROMPTS="${F[2]:-}"
@@ -69,6 +71,8 @@ USE_HALF="${F[8]:-0}"
 OVERWRITE="${F[9]:-0}"
 MAX_VIDEOS="${F[10]:-}"
 DA3_BATCH_SIZE="${F[11]:-}"
+SAM3_TRACK_ISOLATION="${F[12]:-recreate}"
+SAM3_TRACK_TAIL_POLICY="${F[13]:-warn_and_finalize}"
 
 if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" || -z "$SAM3_TEXT_PROMPTS" || -z "$DA3_BATCH_SIZE" ]]; then
   echo "Invalid manifest line (missing required fields): $LINE" >&2
@@ -79,6 +83,22 @@ if ! [[ "$DA3_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   echo "da3_batch_size must be a positive integer." >&2
   exit 1
 fi
+case "$SAM3_TRACK_ISOLATION" in
+  recreate|reset|both) ;;
+  *)
+    echo "Invalid sam3_track_isolation '$SAM3_TRACK_ISOLATION' in manifest line: $LINE" >&2
+    echo "sam3_track_isolation must be one of: recreate, reset, both." >&2
+    exit 1
+    ;;
+esac
+case "$SAM3_TRACK_TAIL_POLICY" in
+  warn_and_finalize|fail_fast) ;;
+  *)
+    echo "Invalid sam3_track_tail_policy '$SAM3_TRACK_TAIL_POLICY' in manifest line: $LINE" >&2
+    echo "sam3_track_tail_policy must be one of: warn_and_finalize, fail_fast." >&2
+    exit 1
+    ;;
+esac
 
 if [[ "$INPUT_VIDEO_DIR" != /* ]]; then
   INPUT_VIDEO_DIR="$REPO_ROOT/$INPUT_VIDEO_DIR"
@@ -158,6 +178,8 @@ if [[ -n "${MAX_VIDEOS:-}" ]]; then
   CMD+=(--max-videos "$MAX_VIDEOS")
 fi
 CMD+=(--da3-batch-size "$DA3_BATCH_SIZE")
+CMD+=(--sam3-track-isolation "$SAM3_TRACK_ISOLATION")
+CMD+=(--sam3-track-tail-policy "$SAM3_TRACK_TAIL_POLICY")
 
 echo "Host: $(hostname)"
 echo "Start time: $(date)"

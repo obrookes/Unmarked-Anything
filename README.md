@@ -202,6 +202,8 @@ python apps/camera_trap/cli/dap3_cli.py \
 | `--conf` | float | no | `0.25` | SAM3 confidence threshold. |
 | `--device` | enum | no | `auto` | `auto`, `cuda`, or `cpu`. |
 | `--half` | flag | no | `false` | Enable FP16 for SAM3 (CUDA only). |
+| `--sam3-track-isolation` | enum | no | `recreate` | Track-mode predictor isolation per video: `recreate`, `reset`, or `both`. |
+| `--sam3-track-tail-policy` | enum | no | `warn_and_finalize` | `warn_and_finalize` keeps partial output on SAM3 stream `IndexError`; `fail_fast` marks the video failed. |
 | `--overwrite` | flag | no | `false` | Reprocess even if output JSON + NPZ already exist. |
 | `--max-videos` | int | no | `None` | Cap number of videos after sorting. Must be `> 0` if provided. |
 
@@ -219,6 +221,8 @@ Per-frame status values include: `processed`, `empty_mask`, `sam_error`, `da3_er
 - `target_fps` is implemented as frame stride (`round(video_fps / target_fps)`, minimum 1).
 - Non-overwrite mode skips videos that already have both expected output files.
 - If `--sam3-mode track` is unavailable in your ultralytics build, use `--sam3-mode frame`.
+- Default `--sam3-track-isolation recreate` prevents cross-video tracker state leakage in multi-video runs.
+- Use `hpc/scripts/summarize_track_run.py --run-dir <run>` for a quick forensic summary of per-video frame counts and track IDs.
 
 ## Additional References
 

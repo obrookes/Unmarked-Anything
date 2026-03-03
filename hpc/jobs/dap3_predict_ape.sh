@@ -25,6 +25,8 @@ USE_HALF="${USE_HALF:-0}"
 OVERWRITE="${OVERWRITE:-0}"
 MAX_VIDEOS="${MAX_VIDEOS:-}"
 DA3_BATCH_SIZE="${DA3_BATCH_SIZE:-}"
+SAM3_TRACK_ISOLATION="${SAM3_TRACK_ISOLATION:-recreate}"
+SAM3_TRACK_TAIL_POLICY="${SAM3_TRACK_TAIL_POLICY:-warn_and_finalize}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/hpc/runs}"
 USE_SCRATCH="${USE_SCRATCH:-1}"
 
@@ -38,6 +40,20 @@ if ! [[ "$DA3_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid DA3_BATCH_SIZE '$DA3_BATCH_SIZE'. Must be a positive integer." >&2
   exit 1
 fi
+case "$SAM3_TRACK_ISOLATION" in
+  recreate|reset|both) ;;
+  *)
+    echo "Invalid SAM3_TRACK_ISOLATION '$SAM3_TRACK_ISOLATION'. Must be recreate, reset, or both." >&2
+    exit 1
+    ;;
+esac
+case "$SAM3_TRACK_TAIL_POLICY" in
+  warn_and_finalize|fail_fast) ;;
+  *)
+    echo "Invalid SAM3_TRACK_TAIL_POLICY '$SAM3_TRACK_TAIL_POLICY'. Must be warn_and_finalize or fail_fast." >&2
+    exit 1
+    ;;
+esac
 
 cd "$REPO_ROOT"
 
@@ -84,6 +100,8 @@ if [[ -n "$MAX_VIDEOS" ]]; then
   CMD+=(--max-videos "$MAX_VIDEOS")
 fi
 CMD+=(--da3-batch-size "$DA3_BATCH_SIZE")
+CMD+=(--sam3-track-isolation "$SAM3_TRACK_ISOLATION")
+CMD+=(--sam3-track-tail-policy "$SAM3_TRACK_TAIL_POLICY")
 
 echo "Command: ${CMD[*]}"
 "${CMD[@]}"
