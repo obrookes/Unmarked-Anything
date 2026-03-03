@@ -33,13 +33,15 @@ except ImportError:
 
 
 DEFAULT_VIDEO_EXTS = ".mp4,.mov,.avi,.mkv"
+TRACK_ISOLATION_CHOICES = ("recreate", "reset", "both")
+TRACK_TAIL_POLICY_CHOICES = ("warn_and_finalize", "fail_fast")
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Batch pipeline: sample frames from videos, run SAM3 segmentation with text prompts, "
@@ -109,8 +111,29 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="DA3 batch size for SAM-positive sampled frames.",
     )
+    parser.add_argument(
+        "--sam3-track-isolation",
+        choices=TRACK_ISOLATION_CHOICES,
+        default="recreate",
+        help=(
+            "Track-mode predictor isolation strategy per video: "
+            "'recreate' (fresh predictor each video), "
+            "'reset' (reuse predictor but clear state), "
+            "'both' (reset previous predictor then recreate)."
+        ),
+    )
+    parser.add_argument(
+        "--sam3-track-tail-policy",
+        choices=TRACK_TAIL_POLICY_CHOICES,
+        default="warn_and_finalize",
+        help=(
+            "Behavior when SAM3 track stream raises IndexError: "
+            "'warn_and_finalize' keeps partial results, "
+            "'fail_fast' marks the video failed."
+        ),
+    )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.target_fps <= 0:
         parser.error("--target-fps must be > 0.")
     if args.max_videos is not None and args.max_videos <= 0:
@@ -145,6 +168,165 @@ def discover_videos(input_dir: Path, video_exts: tuple[str, ...]) -> list[Path]:
     videos = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in video_exts]
     videos.sort(key=lambda p: p.name.lower())
     return videos
+
+
+def create_sam3_track_predictor(sam3_overrides: dict[str, Any]) -> Any:
+    if SAM3VideoSemanticPredictor is None:
+        raise ImportError(
+            "SAM3VideoSemanticPredictor is not available in this ultralytics build. "
+            "Upgrade ultralytics or run with --sam3-mode frame."
+        )
+    return SAM3VideoSemanticPredictor(overrides=sam3_overrides)
+
+
+def reset_sam3_track_predictor_state(sam3_track: Any) -> list[str]:
+    actions: list[str] = []
+    if sam3_track is None:
+        return actions
+
+    for method_name in ("reset_prompts", "reset_image"):
+        method = getattr(sam3_track, method_name, None)
+        if callable(method):
+            method()
+            actions.append(method_name)
+
+    if hasattr(sam3_track, "inference_state"):
+        inference_state = getattr(sam3_track, "inference_state")
+        if isinstance(inference_state, dict):
+            inference_state.clear()
+            actions.append("inference_state.clear")
+        else:
+            setattr(sam3_track, "inference_state", {})
+            actions.append("inference_state={}")
+    else:
+        setattr(sam3_track, "inference_state", {})
+        actions.append("inference_state={}")
+
+    for attr_name in ("dataset", "batch", "results"):
+        if hasattr(sam3_track, attr_name):
+            setattr(sam3_track, attr_name, None)
+            actions.append(f"{attr_name}=None")
+    if hasattr(sam3_track, "seen"):
+        setattr(sam3_track, "seen", 0)
+        actions.append("seen=0")
+
+    tracker = getattr(sam3_track, "tracker", None)
+    if tracker is None:
+        return actions
+
+    tracker_reset_image = getattr(tracker, "reset_image", None)
+    if callable(tracker_reset_image):
+        tracker_reset_image()
+        actions.append("tracker.reset_image")
+
+    if hasattr(tracker, "inference_state"):
+        tracker_inference_state = getattr(tracker, "inference_state")
+        if isinstance(tracker_inference_state, dict):
+            tracker_inference_state.clear()
+            actions.append("tracker.inference_state.clear")
+        else:
+            setattr(tracker, "inference_state", {})
+            actions.append("tracker.inference_state={}")
+
+    return actions
+
+
+def prepare_sam3_track_predictor_for_video(
+    *,
+    sam3_track: Any,
+    isolation_mode: str,
+    sam3_overrides: dict[str, Any],
+) -> tuple[Any, list[str]]:
+    actions: list[str] = []
+    if isolation_mode not in TRACK_ISOLATION_CHOICES:
+        raise ValueError(
+            f"Unknown --sam3-track-isolation '{isolation_mode}'. "
+            f"Expected one of: {', '.join(TRACK_ISOLATION_CHOICES)}."
+        )
+
+    if isolation_mode == "recreate":
+        return create_sam3_track_predictor(sam3_overrides), ["recreate"]
+
+    if isolation_mode == "reset":
+        if sam3_track is None:
+            sam3_track = create_sam3_track_predictor(sam3_overrides)
+            actions.append("create")
+        reset_actions = reset_sam3_track_predictor_state(sam3_track)
+        actions.append("reset")
+        actions.extend([f"reset:{name}" for name in reset_actions])
+        return sam3_track, actions
+
+    # isolation_mode == "both"
+    if sam3_track is not None:
+        reset_actions = reset_sam3_track_predictor_state(sam3_track)
+        actions.append("reset_previous")
+        actions.extend([f"reset:{name}" for name in reset_actions])
+    sam3_track = create_sam3_track_predictor(sam3_overrides)
+    actions.append("recreate")
+    return sam3_track, actions
+
+
+def validate_track_state_num_frames(
+    *,
+    sam3_track: Any,
+    video_stem: str,
+    expected_sampled_frames: int | None,
+    sample_interval: int,
+) -> int | None:
+    inference_state = getattr(sam3_track, "inference_state", None)
+    num_frames = (
+        int(inference_state.get("num_frames"))
+        if isinstance(inference_state, dict) and inference_state.get("num_frames") is not None
+        else None
+    )
+    if (
+        expected_sampled_frames is not None
+        and num_frames is not None
+        and abs(num_frames - expected_sampled_frames) > 1
+    ):
+        raise RuntimeError(
+            "SAM3 track predictor state mismatch for video "
+            f"'{video_stem}': inference_state.num_frames={num_frames}, "
+            f"expected_sampled_frames={expected_sampled_frames}, sample_interval={sample_interval}. "
+            "This usually indicates cross-video state leakage."
+        )
+    return num_frames
+
+
+def handle_track_stream_index_error(
+    *,
+    exc: Exception,
+    video_stem: str,
+    sampled_idx: int,
+    dataset_frame: Any,
+    sample_interval: int,
+    isolation_mode: str,
+    tail_policy: str,
+    warnings: list[str],
+) -> bool:
+    context = (
+        f"video={video_stem} sampled_idx={sampled_idx} dataset_frame={dataset_frame} "
+        f"sample_interval={sample_interval} isolation={isolation_mode}"
+    )
+    if tail_policy == "warn_and_finalize":
+        warning = (
+            "SAM3 track stream ended with IndexError; finalizing partial results "
+            f"({context}): {type(exc).__name__}: {exc}"
+        )
+        warnings.append(warning)
+        print(f"Warning [{video_stem}]: {warning}")
+        return True
+
+    if tail_policy == "fail_fast":
+        raise RuntimeError(
+            "SAM3 track stream raised IndexError and fail-fast policy is enabled "
+            f"({context}): {type(exc).__name__}: {exc}"
+        ) from exc
+
+    raise ValueError(
+        f"Unknown --sam3-track-tail-policy '{tail_policy}'. "
+        f"Expected one of: {', '.join(TRACK_TAIL_POLICY_CHOICES)}."
+    )
 
 
 def slugify_prompt(prompt: str) -> str:
@@ -442,6 +624,7 @@ def process_video(
     prompt_slugs: list[str],
     device: torch.device,
     da3_batch_size: int,
+    track_setup_actions: list[str] | None = None,
 ) -> dict[str, Any]:
     video_stem = video_path.stem
     video_out_dir = output_root / video_stem
@@ -488,6 +671,10 @@ def process_video(
         "frame_height": 0,
         "sam3_prompts": list(args.sam3_text_prompts),
         "sam3_conf": float(args.conf),
+        "sam3_track_isolation": args.sam3_track_isolation if args.sam3_mode == "track" else None,
+        "sam3_track_tail_policy": args.sam3_track_tail_policy if args.sam3_mode == "track" else None,
+        "sam3_track_setup_actions": list(track_setup_actions or []),
+        "sam3_tracker_num_frames": None,
         "da3_model_id": args.da3_model_id,
         "da3_batch_size": int(da3_batch_size),
         "device": str(device),
@@ -769,6 +956,7 @@ def process_video(
                 raise RuntimeError("SAM3 track predictor is not initialized.")
 
             sampled_idx = 0
+            validated_track_state = False
             track_stream = sam3_track(
                 source=str(video_path),
                 text=args.sam3_text_prompts,
@@ -782,19 +970,27 @@ def process_video(
                 except StopIteration:
                     break
                 except IndexError as exc:
-                    # Some ultralytics/SAM3 builds can raise IndexError at stream tail.
-                    # Preserve already processed frames instead of failing the whole video.
-                    warning = (
-                        "SAM3 track stream ended with IndexError; "
-                        f"finalizing partial results: {type(exc).__name__}: {exc}"
+                    dataset_frame = getattr(getattr(sam3_track, "dataset", None), "frame", None)
+                    should_finalize = handle_track_stream_index_error(
+                        exc=exc,
+                        video_stem=video_stem,
+                        sampled_idx=sampled_idx,
+                        dataset_frame=dataset_frame,
+                        sample_interval=sample_interval,
+                        isolation_mode=args.sam3_track_isolation,
+                        tail_policy=args.sam3_track_tail_policy,
+                        warnings=video_json["warnings"],
                     )
-                    video_json["warnings"].append(warning)
-                    print(f"Warning [{video_stem}]: {warning}")
-                    break
+                    if should_finalize:
+                        break
 
                 default_frame_idx = sampled_idx * sample_interval
                 dataset_frame = getattr(getattr(sam3_track, "dataset", None), "frame", None)
-                frame_idx = int(dataset_frame) - 1 if isinstance(dataset_frame, int) and dataset_frame > 0 else default_frame_idx
+                frame_idx = (
+                    int(dataset_frame) - 1
+                    if isinstance(dataset_frame, int) and dataset_frame > 0
+                    else default_frame_idx
+                )
                 timestamp = float(frame_idx / video_fps) if video_fps > 0 else None
                 rec = base_frame_record(frame_idx, timestamp)
                 rec["sam3_mode"] = "track"
@@ -802,6 +998,14 @@ def process_video(
                 counts["sampled_frames"] += 1
                 update_batch_progress()
                 sampled_idx += 1
+                if not validated_track_state:
+                    video_json["sam3_tracker_num_frames"] = validate_track_state_num_frames(
+                        sam3_track=sam3_track,
+                        video_stem=video_stem,
+                        expected_sampled_frames=estimated_sampled_frames,
+                        sample_interval=sample_interval,
+                    )
+                    validated_track_state = True
 
                 try:
                     rec["track_summary"] = extract_track_summary(sam_result)
@@ -931,7 +1135,7 @@ def main() -> None:
                 "SAM3VideoSemanticPredictor is not available in this ultralytics build. "
                 "Upgrade ultralytics or run with --sam3-mode frame."
             )
-        sam3_track = SAM3VideoSemanticPredictor(overrides=sam3_overrides)
+        sam3_track = None
 
     manifest: dict[str, Any] = {
         "started_at_utc": utc_now_iso(),
@@ -941,6 +1145,8 @@ def main() -> None:
         "video_exts": list(video_exts),
         "target_fps": float(args.target_fps),
         "sam3_mode": args.sam3_mode,
+        "sam3_track_isolation": args.sam3_track_isolation if args.sam3_mode == "track" else None,
+        "sam3_track_tail_policy": args.sam3_track_tail_policy if args.sam3_mode == "track" else None,
         "sam3_model_path": str(Path(args.sam3_model_path).resolve()),
         "sam3_prompts": list(args.sam3_text_prompts),
         "da3_model_id": args.da3_model_id,
@@ -960,16 +1166,39 @@ def main() -> None:
 
     for idx, video_path in enumerate(all_videos, start=1):
         print(f"[{idx}/{len(all_videos)}] Processing {video_path.name} ...")
+        track_setup_actions: list[str] = []
+        current_sam3_track = sam3_track
+        video_stem = video_path.stem
+        video_out_dir = output_root / video_stem
+        output_exists = (
+            (video_out_dir / f"{video_stem}.json").exists()
+            and (video_out_dir / f"{video_stem}_arrays.npz").exists()
+        )
+        needs_processing = bool(args.overwrite) or not output_exists
+
+        if args.sam3_mode == "track" and needs_processing:
+            current_sam3_track, track_setup_actions = prepare_sam3_track_predictor_for_video(
+                sam3_track=sam3_track,
+                isolation_mode=args.sam3_track_isolation,
+                sam3_overrides=sam3_overrides,
+            )
+            sam3_track = current_sam3_track
+            print(
+                "  -> track setup: "
+                f"{', '.join(track_setup_actions) if track_setup_actions else 'none'}"
+            )
+
         entry = process_video(
             video_path=video_path,
             output_root=output_root,
             args=args,
             sam3_frame=sam3_frame,
-            sam3_track=sam3_track,
+            sam3_track=current_sam3_track,
             da3=da3,
             prompt_slugs=prompt_slugs,
             device=device,
             da3_batch_size=da3_batch_size,
+            track_setup_actions=track_setup_actions,
         )
         manifest["videos"].append(entry)
         update_and_write_manifest(manifest_path, manifest)

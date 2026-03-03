@@ -41,6 +41,7 @@ INPUT_VIDEO_DIR=$HOME/data/camera_trap/videos,\
 SAM3_MODEL_PATH=$HOME/models/safari_checkpoint_hf.pt,\
 SAM3_TEXT_PROMPTS=ape,baboon,\
 TARGET_FPS=1.0,SAM3_MODE=track,DEVICE=auto,USE_HALF=1,OVERWRITE=0,MAX_VIDEOS=,DA3_BATCH_SIZE=4,\
+SAM3_TRACK_ISOLATION=recreate,SAM3_TRACK_TAIL_POLICY=warn_and_finalize,\
 OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
   hpc/jobs/dap3_predict_ape.sh
 ```
@@ -63,6 +64,8 @@ OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
 10. `overwrite` (`0`/`1`)
 11. `max_videos` (optional)
 12. `da3_batch_size` (required, positive integer)
+13. `sam3_track_isolation` (optional: `recreate`, `reset`, `both`; default `recreate`)
+14. `sam3_track_tail_policy` (optional: `warn_and_finalize`, `fail_fast`; default `warn_and_finalize`)
 
 Notes:
 - Comment lines start with `#`.
@@ -72,6 +75,7 @@ Notes:
 - `job_tag` is generated automatically from SAM3 model, DA3 model, prompts, fps, and mode.
 - For model-based tags, only model identifiers/basenames are used (not full filesystem paths).
 - `da3_batch_size` is passed through directly to the CLI and must be a positive integer.
+- `sam3_track_isolation` and `sam3_track_tail_policy` are only relevant when `sam3_mode=track`.
 
 ### 2) Submit array
 
@@ -126,6 +130,14 @@ hpc/scripts/collect_results.sh <from_dir> [to_dir]
 ```
 
 If `<from_dir>` is omitted and `SLURM_TMPDIR` is set, it uses `SLURM_TMPDIR`.
+
+### `hpc/scripts/summarize_track_run.py`
+
+Summarizes per-video JSON outputs to highlight tracking anomalies (sampled frame counts, first track IDs, warnings).
+
+```bash
+python hpc/scripts/summarize_track_run.py --run-dir hpc/runs/<run_tag>
+```
 
 ## Output conventions
 
