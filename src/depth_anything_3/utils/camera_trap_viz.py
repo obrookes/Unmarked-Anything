@@ -11,7 +11,7 @@ import numpy as np
 from matplotlib.patches import Rectangle
 
 
-def load_artifacts(output_root: Path, video_stem: str | None) -> tuple[dict[str, Any], np.lib.npyio.NpzFile]:
+def resolve_video_stem(output_root: Path, video_stem: str | None) -> tuple[str, dict[str, Any] | None]:
     manifest_path = output_root / "run_manifest.json"
     manifest = None
     if manifest_path.is_file():
@@ -24,7 +24,13 @@ def load_artifacts(output_root: Path, video_stem: str | None) -> tuple[dict[str,
         successes = [v for v in manifest.get("videos", []) if v.get("status") == "success"]
         if not successes:
             raise RuntimeError("No successful videos found in run_manifest.json")
-        selected_stem = successes[0]["video_name"]
+        selected_stem = str(successes[0]["video_name"])
+
+    return selected_stem, manifest
+
+
+def load_artifacts(output_root: Path, video_stem: str | None) -> tuple[dict[str, Any], np.lib.npyio.NpzFile]:
+    selected_stem, manifest = resolve_video_stem(output_root=output_root, video_stem=video_stem)
 
     video_dir = output_root / selected_stem
     json_path = video_dir / f"{selected_stem}.json"
@@ -168,6 +174,215 @@ def build_object_masks(npz_data: np.lib.npyio.NpzFile, frame_row: dict[str, Any]
     return objects, missing_keys
 
 
+def get_depth_array(
+    npz_data: np.lib.npyio.NpzFile,
+    frame_row: dict[str, Any],
+    frame_shape_hw: tuple[int, int] | None = None,
+) -> np.ndarray:
+    depth_key = ((frame_row.get("npz_keys") or {}).get("depth"))
+    if not depth_key or depth_key not in npz_data:
+        raise KeyError(f"Frame {frame_row.get('frame_index')}: missing depth key {depth_key}")
+    depth = np.asarray(npz_data[depth_key], dtype=np.float32)
+    if frame_shape_hw is not None and depth.shape != frame_shape_hw:
+        depth = cv2.resize(depth, (frame_shape_hw[1], frame_shape_hw[0]), interpolation=cv2.INTER_CUBIC)
+    return depth
+
+
+def _compute_depth_stats_for_objects(
+    valid_objects: list[dict[str, Any]],
+    depth: np.ndarray,
+) -> list[dict[str, Any]]:
+    depth_stats: list[dict[str, Any]] = []
+    for obj in valid_objects:
+        obj_mask = np.asarray(obj["mask"], dtype=bool)
+        if obj_mask.shape != depth.shape or not np.any(obj_mask):
+            continue
+        bbox = obj.get("bbox_xyxy")
+        center = obj.get("center_xy")
+        if (not bbox or len(bbox) != 4):
+            ys, xs = np.where(obj_mask)
+            bbox = [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+        if (not center or len(center) != 2) and bbox and len(bbox) == 4:
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            center = [int((x1 + x2) // 2), int((y1 + y2) // 2)]
+        if not bbox or len(bbox) != 4 or not center or len(center) != 2:
+            continue
+
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        x1 = max(0, min(x1, depth.shape[1] - 1))
+        x2 = max(0, min(x2, depth.shape[1] - 1))
+        y1 = max(0, min(y1, depth.shape[0] - 1))
+        y2 = max(0, min(y2, depth.shape[0] - 1))
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+        bbox_mask = np.zeros_like(obj_mask, dtype=bool)
+        bbox_mask[y1 : y2 + 1, x1 : x2 + 1] = True
+        cx, cy = [int(v) for v in center]
+        cx = max(0, min(cx, depth.shape[1] - 1))
+        cy = max(0, min(cy, depth.shape[0] - 1))
+
+        mask_vals = depth[obj_mask]
+        bbox_vals = depth[bbox_mask]
+        bbox_only_vals = depth[bbox_mask & (~obj_mask)]
+
+        depth_stats.append(
+            {
+                "object_index": int(obj.get("object_index", len(depth_stats))),
+                "track_id": obj.get("track_id"),
+                "mask_mean": float(np.nanmean(mask_vals)) if mask_vals.size else float("nan"),
+                "bbox_mean": float(np.nanmean(bbox_vals)) if bbox_vals.size else float("nan"),
+                "bbox_only_mean": float(np.nanmean(bbox_only_vals)) if bbox_only_vals.size else float("nan"),
+                "center_depth": float(depth[cy, cx]),
+                "bbox": (x1, y1, x2, y2),
+                "center": (cx, cy),
+            }
+        )
+
+    return depth_stats
+
+
+def draw_overlay_frame(
+    frame_rgb: np.ndarray,
+    rec: dict[str, Any],
+    npz_obj: np.lib.npyio.NpzFile,
+    overlay_alpha: float = 0.45,
+    show_bbox: bool = True,
+    show_center: bool = True,
+    draw_mask: bool = True,
+    draw_hud: bool = False,
+    compute_depth_stats: bool = False,
+) -> tuple[np.ndarray, list[dict[str, Any]], list[str], list[str]]:
+    warnings: list[str] = []
+    frame_idx = int(rec.get("frame_index", -1))
+    overlay = frame_rgb.astype(np.float32) / 255.0
+
+    try:
+        union_mask = build_union_mask(npz_obj, rec)
+    except Exception as e:
+        warnings.append(f"Frame {frame_idx}: mask missing/invalid ({e})")
+        union_mask = np.zeros(frame_rgb.shape[:2], dtype=bool)
+
+    object_rows, missing_object_keys = build_object_masks(npz_obj, rec)
+    if missing_object_keys:
+        warnings.append(f"Frame {frame_idx}: missing object mask keys: {missing_object_keys[:6]}")
+
+    if union_mask.shape != frame_rgb.shape[:2]:
+        warnings.append(
+            f"Frame {frame_idx}: mask/frame shape mismatch {union_mask.shape} vs {frame_rgb.shape[:2]} (mask ignored)"
+        )
+        union_mask = np.zeros(frame_rgb.shape[:2], dtype=bool)
+
+    cmap = plt.get_cmap("tab20")
+    valid_objects: list[dict[str, Any]] = []
+    for obj in object_rows:
+        obj_mask = np.asarray(obj["mask"], dtype=bool)
+        if obj_mask.shape != frame_rgb.shape[:2]:
+            warnings.append(
+                f"Frame {frame_idx}: object mask/frame shape mismatch {obj_mask.shape} vs {frame_rgb.shape[:2]}"
+            )
+            continue
+        if not np.any(obj_mask):
+            continue
+        valid_objects.append(obj)
+
+    if draw_mask:
+        if valid_objects:
+            for obj in valid_objects:
+                color = np.array(cmap(int(obj["object_index"]) % 20)[:3], dtype=np.float32)
+                obj_mask = np.asarray(obj["mask"], dtype=bool)
+                overlay[obj_mask] = (1.0 - overlay_alpha) * overlay[obj_mask] + overlay_alpha * color
+        else:
+            overlay_color = np.array([0.0, 1.0, 1.0], dtype=np.float32)
+            if np.any(union_mask):
+                overlay[union_mask] = (1.0 - overlay_alpha) * overlay[union_mask] + overlay_alpha * overlay_color
+
+    overlay_rgb = np.clip(overlay * 255.0, 0, 255).astype(np.uint8)
+    overlay_bgr = cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR)
+
+    if show_bbox or show_center:
+        if valid_objects:
+            for obj in valid_objects:
+                color = np.array(cmap(int(obj["object_index"]) % 20)[:3], dtype=np.float32)
+                color_bgr = tuple(int(c) for c in (color[::-1] * 255.0))
+                bbox = obj.get("bbox_xyxy")
+                center = obj.get("center_xy")
+                if (not bbox or len(bbox) != 4) and np.any(obj["mask"]):
+                    ys, xs = np.where(np.asarray(obj["mask"], dtype=bool))
+                    bbox = [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+                if (not center or len(center) != 2) and bbox and len(bbox) == 4:
+                    x1, y1, x2, y2 = [int(v) for v in bbox]
+                    center = [int((x1 + x2) // 2), int((y1 + y2) // 2)]
+                if show_bbox and bbox and len(bbox) == 4:
+                    x1, y1, x2, y2 = [int(v) for v in bbox]
+                    cv2.rectangle(overlay_bgr, (x1, y1), (x2, y2), color_bgr, 2)
+                if show_center and center and len(center) == 2:
+                    cv2.circle(overlay_bgr, (int(center[0]), int(center[1])), 4, color_bgr, -1)
+                    cv2.circle(overlay_bgr, (int(center[0]), int(center[1])), 5, (0, 0, 0), 1)
+        else:
+            if show_bbox:
+                bbox = rec.get("bbox_xyxy")
+                if bbox and len(bbox) == 4:
+                    x1, y1, x2, y2 = [int(v) for v in bbox]
+                    cv2.rectangle(overlay_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            if show_center:
+                center = rec.get("center_xy")
+                if center and len(center) == 2:
+                    cv2.circle(overlay_bgr, (int(center[0]), int(center[1])), 4, (0, 255, 255), -1)
+                    cv2.circle(overlay_bgr, (int(center[0]), int(center[1])), 5, (0, 0, 0), 1)
+
+    depth_stats: list[dict[str, Any]] = []
+    hud_lines: list[str] = []
+    if compute_depth_stats or draw_hud:
+        try:
+            depth = get_depth_array(npz_data=npz_obj, frame_row=rec, frame_shape_hw=frame_rgb.shape[:2])
+            depth_stats = _compute_depth_stats_for_objects(valid_objects=valid_objects, depth=depth)
+        except Exception as e:
+            warnings.append(f"Frame {frame_idx}: depth stats unavailable ({e})")
+            depth_stats = []
+
+    if draw_hud:
+        object_count = len(valid_objects)
+        hud_lines.append(
+            f"frame={frame_idx} obj={object_count} mask_px={int(rec.get('mask_nonzero_pixels', 0))}"
+        )
+        if depth_stats:
+            for stat in depth_stats[:4]:
+                bbox_only_txt = "NaN" if np.isnan(stat["bbox_only_mean"]) else f"{stat['bbox_only_mean']:.4f}"
+                hud_lines.append(
+                    f"obj{stat['object_index']} mask={stat['mask_mean']:.4f} "
+                    f"center={stat['center_depth']:.4f} bbox={stat['bbox_mean']:.4f} bbox_only={bbox_only_txt}"
+                )
+
+        if hud_lines:
+            y = 24
+            for line in hud_lines[:6]:
+                cv2.putText(
+                    overlay_bgr,
+                    line,
+                    (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    overlay_bgr,
+                    line,
+                    (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (16, 16, 16),
+                    1,
+                    cv2.LINE_AA,
+                )
+                y += 22
+
+    return cv2.cvtColor(overlay_bgr, cv2.COLOR_BGR2RGB), depth_stats, hud_lines, warnings
+
+
 def _format_object_mask_means(obj_stats: list[dict[str, Any]], max_items: int = 4) -> str:
     if not obj_stats:
         return "none"
@@ -225,126 +440,41 @@ def render_page(
             ax_depth.axis("off")
             continue
 
-        try:
-            union_mask = build_union_mask(npz_obj, rec)
-        except Exception as e:
-            warnings.append(f"Frame {frame_idx}: mask missing/invalid ({e})")
-            union_mask = np.zeros(frame_rgb.shape[:2], dtype=bool)
-        object_rows, missing_object_keys = build_object_masks(npz_obj, rec)
-        if missing_object_keys:
-            warnings.append(
-                f"Frame {frame_idx}: missing object mask keys: {missing_object_keys[:6]}"
-            )
-
-        if union_mask.shape != frame_rgb.shape[:2]:
-            warnings.append(
-                f"Frame {frame_idx}: mask/frame shape mismatch {union_mask.shape} vs {frame_rgb.shape[:2]} (mask ignored)"
-            )
-            union_mask = np.zeros(frame_rgb.shape[:2], dtype=bool)
-
-        overlay = frame_rgb.astype(np.float32) / 255.0
-        cmap = plt.get_cmap("tab20")
-        valid_objects: list[dict[str, Any]] = []
-        for obj in object_rows:
-            obj_mask = np.asarray(obj["mask"], dtype=bool)
-            if obj_mask.shape != frame_rgb.shape[:2]:
-                warnings.append(
-                    f"Frame {frame_idx}: object mask/frame shape mismatch {obj_mask.shape} vs {frame_rgb.shape[:2]}"
-                )
-                continue
-            if not np.any(obj_mask):
-                continue
-            valid_objects.append(obj)
-
-        if valid_objects:
-            for obj in valid_objects:
-                color = np.array(cmap(int(obj["object_index"]) % 20)[:3], dtype=np.float32)
-                obj_mask = np.asarray(obj["mask"], dtype=bool)
-                overlay[obj_mask] = (1.0 - overlay_alpha) * overlay[obj_mask] + overlay_alpha * color
-        else:
-            overlay_color = np.array([0.0, 1.0, 1.0], dtype=np.float32)
-            if np.any(union_mask):
-                overlay[union_mask] = (1.0 - overlay_alpha) * overlay[union_mask] + overlay_alpha * overlay_color
-
-        ax_overlay.imshow(overlay)
-        if show_bbox_and_center:
-            if valid_objects:
-                for obj in valid_objects:
-                    color = np.array(cmap(int(obj["object_index"]) % 20)[:3], dtype=np.float32)
-                    bbox = obj.get("bbox_xyxy")
-                    center = obj.get("center_xy")
-                    if (not bbox or len(bbox) != 4) and np.any(obj["mask"]):
-                        ys, xs = np.where(np.asarray(obj["mask"], dtype=bool))
-                        bbox = [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
-                    if (not center or len(center) != 2) and bbox and len(bbox) == 4:
-                        x1, y1, x2, y2 = [int(v) for v in bbox]
-                        center = [int((x1 + x2) // 2), int((y1 + y2) // 2)]
-                    if bbox and len(bbox) == 4:
-                        x1, y1, x2, y2 = [int(v) for v in bbox]
-                        ax_overlay.add_patch(
-                            Rectangle(
-                                (x1, y1),
-                                x2 - x1,
-                                y2 - y1,
-                                fill=False,
-                                edgecolor=color,
-                                linewidth=1.8,
-                            )
-                        )
-                    if center and len(center) == 2:
-                        ax_overlay.plot(
-                            int(center[0]),
-                            int(center[1]),
-                            marker="o",
-                            markersize=5,
-                            color=color,
-                            markeredgecolor="black",
-                        )
-            else:
-                bbox = rec.get("bbox_xyxy")
-                if bbox and len(bbox) == 4:
-                    x1, y1, x2, y2 = bbox
-                    ax_overlay.add_patch(
-                        Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor="lime", linewidth=1.5)
-                    )
-                center = rec.get("center_xy")
-                if center and len(center) == 2:
-                    ax_overlay.plot(
-                        center[0], center[1], marker="o", markersize=5, color="yellow", markeredgecolor="black"
-                    )
+        overlay_rgb, depth_stats, _, overlay_warnings = draw_overlay_frame(
+            frame_rgb=frame_rgb,
+            rec=rec,
+            npz_obj=npz_obj,
+            overlay_alpha=overlay_alpha,
+            show_bbox=show_bbox_and_center,
+            show_center=show_bbox_and_center,
+            draw_mask=True,
+            draw_hud=False,
+            compute_depth_stats=True,
+        )
+        warnings.extend(overlay_warnings)
+        ax_overlay.imshow(overlay_rgb)
 
         ts = rec.get("timestamp_sec")
         ts_txt = f"{ts:.2f}s" if isinstance(ts, (int, float)) else "n/a"
-        object_count = len(valid_objects)
+        object_count = len(depth_stats) if depth_stats else len((rec.get("npz_keys") or {}).get("objects") or [])
         ax_overlay.set_title(
             f"Frame {frame_idx} @ {ts_txt} | mask_px={rec.get('mask_nonzero_pixels', 0)} "
             f"| area={rec.get('mask_area_fraction', 0.0):.4f} | objects={object_count}"
         )
         ax_overlay.axis("off")
 
-        depth_key = ((rec.get("npz_keys") or {}).get("depth"))
-        if not depth_key or depth_key not in npz_obj:
-            warnings.append(f"Frame {frame_idx}: missing depth key {depth_key}")
-            ax_depth.text(0.5, 0.5, f"Missing depth\n{depth_key}", ha="center", va="center")
+        try:
+            depth = get_depth_array(npz_data=npz_obj, frame_row=rec, frame_shape_hw=frame_rgb.shape[:2])
+        except Exception as e:
+            warnings.append(f"Frame {frame_idx}: depth unavailable ({e})")
+            ax_depth.text(0.5, 0.5, f"Missing depth\nframe={frame_idx}", ha="center", va="center")
             ax_depth.axis("off")
             continue
 
-        depth = np.asarray(npz_obj[depth_key], dtype=np.float32)
-        obj_depth_stats: list[dict[str, Any]] = []
-        if valid_objects:
-            for obj in valid_objects:
-                obj_mask = np.asarray(obj["mask"], dtype=bool)
-                vals = depth[obj_mask]
-                obj_depth_stats.append(
-                    {
-                        "object_index": obj.get("object_index"),
-                        "mask_mean": float(np.nanmean(vals)) if vals.size else float("nan"),
-                    }
-                )
         im = ax_depth.imshow(depth, cmap=depth_cmap)
         plt.colorbar(im, ax=ax_depth, fraction=0.046, pad=0.01)
-        if obj_depth_stats:
-            depth_title = f"Depth | object mean(mask): {_format_object_mask_means(obj_depth_stats)}"
+        if depth_stats:
+            depth_title = f"Depth | object mean(mask): {_format_object_mask_means(depth_stats)}"
         else:
             depth_title = (
                 f"Depth | mean(mask)={rec.get('depth_mask_mean')} | center={rec.get('depth_center_value')}"
@@ -362,6 +492,105 @@ def render_page(
             print("-", w)
         if len(warnings) > 30:
             print(f"... {len(warnings) - 30} more warnings")
+
+
+def build_frame_record_map(records: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    rec_map: dict[int, dict[str, Any]] = {}
+    for rec in records:
+        frame_idx = int(rec.get("frame_index", -1))
+        if frame_idx < 0:
+            continue
+        rec_map[frame_idx] = rec
+    return rec_map
+
+
+def write_overlay_video(
+    records: list[dict[str, Any]],
+    cap_obj: cv2.VideoCapture,
+    npz_obj: np.lib.npyio.NpzFile,
+    output_path: Path,
+    overlay_alpha: float = 0.45,
+    show_bbox: bool = True,
+    show_center: bool = True,
+    draw_mask: bool = True,
+    draw_hud: bool = True,
+    output_fps: float | None = None,
+    fourcc: str = "mp4v",
+) -> dict[str, Any]:
+    if len(fourcc) != 4:
+        raise ValueError("fourcc must be a 4-character code, e.g. 'mp4v'")
+
+    rec_map = build_frame_record_map(records)
+    frame_count = int(cap_obj.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap_obj.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap_obj.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    source_fps = float(cap_obj.get(cv2.CAP_PROP_FPS) or 0.0)
+    fps = float(output_fps) if output_fps is not None else (source_fps if source_fps > 0 else 30.0)
+    if fps <= 0:
+        raise ValueError("output fps must be > 0")
+    if frame_count <= 0:
+        raise RuntimeError("video capture reports no frames")
+    if width <= 0 or height <= 0:
+        raise RuntimeError("video capture reports invalid dimensions")
+
+    ok = cap_obj.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    if not ok:
+        raise RuntimeError("failed to seek source capture to frame 0")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*fourcc),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        raise RuntimeError(f"Failed to open VideoWriter for: {output_path}")
+
+    warnings: list[str] = []
+    written = 0
+    overlaid = 0
+    try:
+        for frame_idx in range(frame_count):
+            ret, frame_bgr = cap_obj.read()
+            if not ret or frame_bgr is None:
+                warnings.append(f"Decode failed at source frame {frame_idx}")
+                break
+
+            rec = rec_map.get(frame_idx)
+            if rec is None:
+                writer.write(frame_bgr)
+                written += 1
+                continue
+
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            overlay_rgb, _, _, frame_warnings = draw_overlay_frame(
+                frame_rgb=frame_rgb,
+                rec=rec,
+                npz_obj=npz_obj,
+                overlay_alpha=overlay_alpha,
+                show_bbox=show_bbox,
+                show_center=show_center,
+                draw_mask=draw_mask,
+                draw_hud=draw_hud,
+                compute_depth_stats=draw_hud,
+            )
+            warnings.extend(frame_warnings)
+            writer.write(cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR))
+            written += 1
+            overlaid += 1
+    finally:
+        writer.release()
+
+    return {
+        "output_path": str(output_path),
+        "source_frame_count": frame_count,
+        "written_frames": written,
+        "overlay_frames": overlaid,
+        "source_fps": source_fps,
+        "output_fps": fps,
+        "warnings": warnings,
+    }
 
 
 def select_records_for_analysis(

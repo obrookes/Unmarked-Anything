@@ -81,7 +81,42 @@ Legacy wrapper also works: `python dap3_cli.py ...`
 
 - Input video: `assets/videos/03290392_0_10.MP4`
 - Suggested output directory: `outputs/demo/`
-- Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb) (configured for `assets/videos` and `outputs/demo`; includes a DAP3-style selected-frame analysis cell with manual/auto frame selection, depth-map mask contour overlay, bbox/center annotations, and mask-vs-bbox depth statistics/distributions)
+- Visualization CLI: `python apps/camera_trap/cli/visualize_test_output.py ...`
+- Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb) (kept for ad-hoc exploration; CLI is the repeatable/default path)
+
+Interactive example:
+
+```bash
+python apps/camera_trap/cli/visualize_test_output.py \
+  --output-root outputs/demo \
+  --video-stem 03290392_0_10 \
+  --video-path assets/videos/03290392_0_10.MP4 \
+  --view both \
+  --page-size 2
+```
+
+Full-timeline overlay video export example:
+
+```bash
+python apps/camera_trap/cli/visualize_test_output.py \
+  --output-root outputs/demo \
+  --video-stem 03290392_0_10 \
+  --video-path assets/videos/03290392_0_10.MP4 \
+  --view processed \
+  --write-video outputs/demo/03290392_0_10_overlay.mp4 \
+  --ov-mask --ov-bbox --ov-center --ov-hud
+```
+
+Headless export-only example (no GUI windows):
+
+```bash
+python apps/camera_trap/cli/visualize_test_output.py \
+  --output-root outputs/demo \
+  --video-stem 03290392_0_10 \
+  --video-path assets/videos/03290392_0_10.MP4 \
+  --no-gui \
+  --write-video outputs/demo/03290392_0_10_overlay.mp4
+```
 
 ## HPC Execution
 
