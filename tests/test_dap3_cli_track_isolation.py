@@ -59,6 +59,7 @@ class _FakeTracker:
 class _FakePredictor:
     def __init__(self) -> None:
         self.inference_state = {"num_frames": 123, "x": 1}
+        self.model = object()
         self.dataset = object()
         self.batch = object()
         self.results = object()
@@ -88,6 +89,16 @@ def test_reset_sam3_track_predictor_state_clears_fields() -> None:
     assert predictor.seen == 0
     assert predictor.tracker.inference_state == {}
     assert predictor.tracker.reset_image_calls == 1
+
+
+def test_reset_sam3_track_predictor_state_skips_uninitialized_model() -> None:
+    predictor = _FakePredictor()
+    predictor.model = None
+    actions = dap3_cli.reset_sam3_track_predictor_state(predictor)
+    assert "reset_prompts_skipped_uninitialized_model" in actions
+    assert predictor.reset_prompts_calls == 0
+    assert "reset_image" in actions
+    assert predictor.inference_state == {}
 
 
 def test_prepare_track_predictor_recreate(monkeypatch: pytest.MonkeyPatch) -> None:

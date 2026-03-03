@@ -184,11 +184,20 @@ def reset_sam3_track_predictor_state(sam3_track: Any) -> list[str]:
     if sam3_track is None:
         return actions
 
-    for method_name in ("reset_prompts", "reset_image"):
-        method = getattr(sam3_track, method_name, None)
-        if callable(method):
-            method()
-            actions.append(method_name)
+    # ultralytics reset_prompts() may fail before model initialization (model is None).
+    reset_prompts = getattr(sam3_track, "reset_prompts", None)
+    if callable(reset_prompts):
+        model = getattr(sam3_track, "model", None)
+        if model is not None:
+            reset_prompts()
+            actions.append("reset_prompts")
+        else:
+            actions.append("reset_prompts_skipped_uninitialized_model")
+
+    reset_image = getattr(sam3_track, "reset_image", None)
+    if callable(reset_image):
+        reset_image()
+        actions.append("reset_image")
 
     if hasattr(sam3_track, "inference_state"):
         inference_state = getattr(sam3_track, "inference_state")
