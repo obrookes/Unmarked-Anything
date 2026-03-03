@@ -83,6 +83,8 @@ Legacy wrapper also works: `python dap3_cli.py ...`
 - Suggested output directory: `outputs/demo/`
 - Visualization CLI: `python apps/camera_trap/cli/visualize_test_output.py ...`
 - Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb) (kept for ad-hoc exploration; CLI is the repeatable/default path)
+- Pass `--video-dir` for stem-based auto-resolution and selection from `run_manifest.json`.
+- Use `--video-path` only for direct single-video mode.
 
 Interactive example:
 
@@ -90,21 +92,51 @@ Interactive example:
 python apps/camera_trap/cli/visualize_test_output.py \
   --output-root outputs/demo \
   --video-stem 03290392_0_10 \
-  --video-path assets/videos/03290392_0_10.MP4 \
+  --video-dir assets/videos \
   --view both \
   --page-size 2
 ```
 
-Full-timeline overlay video export example:
+Interactive selection example (multiple videos in one run root):
+
+```bash
+python apps/camera_trap/cli/visualize_test_output.py \
+  --output-root outputs/demo \
+  --video-dir assets/videos \
+  --view processed
+```
+
+List videos and exit:
+
+```bash
+python apps/camera_trap/cli/visualize_test_output.py \
+  --output-root outputs/demo \
+  --video-dir assets/videos \
+  --list-videos
+```
+
+Full-timeline overlay video export (single selected video):
 
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
   --output-root outputs/demo \
   --video-stem 03290392_0_10 \
-  --video-path assets/videos/03290392_0_10.MP4 \
+  --video-dir assets/videos \
   --view processed \
   --write-video outputs/demo/03290392_0_10_overlay.mp4 \
   --ov-mask --ov-bbox --ov-center --ov-hud
+```
+
+Analysis-style depth overlay export (no histogram panel; outline-only masks; per-object mean mask-depth labels; full-height external scale bar):
+
+```bash
+python apps/camera_trap/cli/visualize_test_output.py \
+  --output-root outputs/demo \
+  --video-stem 03290392_0_10 \
+  --video-dir assets/videos \
+  --no-gui \
+  --write-video outputs/demo/03290392_0_10_analysis_overlay.mp4 \
+  --export-style analysis-depth
 ```
 
 Headless export-only example (no GUI windows):
@@ -113,10 +145,26 @@ Headless export-only example (no GUI windows):
 python apps/camera_trap/cli/visualize_test_output.py \
   --output-root outputs/demo \
   --video-stem 03290392_0_10 \
-  --video-path assets/videos/03290392_0_10.MP4 \
+  --video-dir assets/videos \
   --no-gui \
   --write-video outputs/demo/03290392_0_10_overlay.mp4
 ```
+
+Batch export-all example:
+
+```bash
+python apps/camera_trap/cli/visualize_test_output.py \
+  --output-root outputs/demo \
+  --video-dir assets/videos \
+  --no-gui \
+  --export-all \
+  --write-video-dir outputs/demo/overlay_videos \
+  --export-style analysis-depth
+```
+
+Batch naming:
+- `--export-style rgb` writes `<stem>_overlay.mp4`
+- `--export-style analysis-depth` writes `<stem>_analysis_overlay.mp4`
 
 ## HPC Execution
 
