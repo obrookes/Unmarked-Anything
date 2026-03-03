@@ -131,6 +131,23 @@ hpc/scripts/collect_results.sh <from_dir> [to_dir]
 
 If `<from_dir>` is omitted and `SLURM_TMPDIR` is set, it uses `SLURM_TMPDIR`.
 
+### `hpc/scripts/clean_outputs.sh`
+
+Removes runtime artifacts with explicit flags:
+- `--logs`: delete `*.out` and `*.err` from `hpc/logs/slurm`
+- `--runs`: delete all entries under `hpc/runs`
+- `--all`: equivalent to `--logs --runs`
+
+Safety options:
+- `--dry-run`: show what would be deleted
+- `--yes`: skip confirmation prompt
+
+```bash
+hpc/scripts/clean_outputs.sh --logs
+hpc/scripts/clean_outputs.sh --runs --yes
+hpc/scripts/clean_outputs.sh --all --dry-run
+```
+
 ### `hpc/scripts/summarize_track_run.py`
 
 Summarizes per-video JSON outputs to highlight tracking anomalies (sampled frame counts, first track IDs, warnings).
