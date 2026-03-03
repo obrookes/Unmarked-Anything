@@ -49,3 +49,12 @@ temp*.png
 
 # Local prompt backlog (private notes)
 /notes/todo-prompts.md
+
+# Video files (ignore all by default, keep the one tracked sample)
+**/*.[mM][pP]4
+**/*.[mM][oO][vV]
+**/*.[aA][vV][iI]
+**/*.[mM][kK][vV]
+**/*.[wW][eE][bB][mM]
+**/*.[mM]4[vV]
+!assets/videos/03290392_0_10.MP4
