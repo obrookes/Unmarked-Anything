@@ -184,15 +184,11 @@ def reset_sam3_track_predictor_state(sam3_track: Any) -> list[str]:
     if sam3_track is None:
         return actions
 
-    # ultralytics reset_prompts() may fail before model initialization (model is None).
-    reset_prompts = getattr(sam3_track, "reset_prompts", None)
-    if callable(reset_prompts):
-        model = getattr(sam3_track, "model", None)
-        if model is not None:
-            reset_prompts()
-            actions.append("reset_prompts")
-        else:
-            actions.append("reset_prompts_skipped_uninitialized_model")
+    # Do not call reset_prompts() in reset mode.
+    # Some ultralytics builds expect prompt-side model internals (for example language feature caches)
+    # to persist across calls after model setup; clearing them here can cause KeyError on next video.
+    if callable(getattr(sam3_track, "reset_prompts", None)):
+        actions.append("reset_prompts_skipped")
 
     reset_image = getattr(sam3_track, "reset_image", None)
     if callable(reset_image):

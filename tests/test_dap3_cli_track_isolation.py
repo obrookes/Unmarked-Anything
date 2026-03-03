@@ -78,9 +78,9 @@ class _FakePredictor:
 def test_reset_sam3_track_predictor_state_clears_fields() -> None:
     predictor = _FakePredictor()
     actions = dap3_cli.reset_sam3_track_predictor_state(predictor)
-    assert "reset_prompts" in actions
+    assert "reset_prompts_skipped" in actions
     assert "reset_image" in actions
-    assert predictor.reset_prompts_calls == 1
+    assert predictor.reset_prompts_calls == 0
     assert predictor.reset_image_calls == 1
     assert predictor.inference_state == {}
     assert predictor.dataset is None
@@ -89,16 +89,6 @@ def test_reset_sam3_track_predictor_state_clears_fields() -> None:
     assert predictor.seen == 0
     assert predictor.tracker.inference_state == {}
     assert predictor.tracker.reset_image_calls == 1
-
-
-def test_reset_sam3_track_predictor_state_skips_uninitialized_model() -> None:
-    predictor = _FakePredictor()
-    predictor.model = None
-    actions = dap3_cli.reset_sam3_track_predictor_state(predictor)
-    assert "reset_prompts_skipped_uninitialized_model" in actions
-    assert predictor.reset_prompts_calls == 0
-    assert "reset_image" in actions
-    assert predictor.inference_state == {}
 
 
 def test_prepare_track_predictor_recreate(monkeypatch: pytest.MonkeyPatch) -> None:
