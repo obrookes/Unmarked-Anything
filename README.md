@@ -79,19 +79,23 @@ Legacy wrapper also works: `python dap3_cli.py ...`
 
 ## Sample Data
 
-- Input video: `assets/videos/03290392_0_10.MP4`
+- Input video: `assets/videos/demo.MP4`
 - Suggested output directory: `outputs/demo/`
 - Visualization CLI: `python apps/camera_trap/cli/visualize_test_output.py ...`
 - Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb) (kept for ad-hoc exploration; CLI is the repeatable/default path)
 - Pass `--video-dir` for stem-based auto-resolution and selection from `run_manifest.json`.
 - Use `--video-path` only for direct single-video mode.
 
+Video preprocessing helper:
+- `hpc/scripts/crop_videos.sh` crops a fixed bottom percentage from all videos in a directory (requires `ffmpeg`).
+- Example: `hpc/scripts/crop_videos.sh --suffix assets/videos -p 9.75`
+
 Interactive example:
 
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
   --output-root outputs/demo \
-  --video-stem 03290392_0_10 \
+  --video-stem demo \
   --video-dir assets/videos \
   --view both \
   --page-size 2
@@ -120,10 +124,10 @@ Full-timeline overlay video export (single selected video):
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
   --output-root outputs/demo \
-  --video-stem 03290392_0_10 \
+  --video-stem demo \
   --video-dir assets/videos \
   --view processed \
-  --write-video outputs/demo/03290392_0_10_overlay.mp4 \
+  --write-video outputs/demo/demo_overlay.mp4 \
   --ov-mask --ov-bbox --ov-center --ov-hud
 ```
 
@@ -132,10 +136,10 @@ Analysis-style depth overlay export (no histogram panel; outline-only masks; per
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
   --output-root outputs/demo \
-  --video-stem 03290392_0_10 \
+  --video-stem demo \
   --video-dir assets/videos \
   --no-gui \
-  --write-video outputs/demo/03290392_0_10_analysis_overlay.mp4 \
+  --write-video outputs/demo/demo_analysis_overlay.mp4 \
   --export-style analysis-depth
 ```
 
@@ -144,10 +148,10 @@ Headless export-only example (no GUI windows):
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
   --output-root outputs/demo \
-  --video-stem 03290392_0_10 \
+  --video-stem demo \
   --video-dir assets/videos \
   --no-gui \
-  --write-video outputs/demo/03290392_0_10_overlay.mp4
+  --write-video outputs/demo/demo_overlay.mp4
 ```
 
 Batch export-all example:

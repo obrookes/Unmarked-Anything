@@ -148,6 +148,17 @@ hpc/scripts/clean_outputs.sh --runs --yes
 hpc/scripts/clean_outputs.sh --all --dry-run
 ```
 
+### `hpc/scripts/crop_videos.sh`
+
+Batch-crops a fixed bottom percentage from all videos in a directory using `ffmpeg`.
+Useful for removing camera overlays/timestamps before running the camera trap pipeline.
+
+```bash
+hpc/scripts/crop_videos.sh --suffix assets/videos -p 9.75
+# or overwrite in place:
+hpc/scripts/crop_videos.sh --overwrite assets/videos -p 9.75
+```
+
 ### `hpc/scripts/summarize_track_run.py`
 
 Summarizes per-video JSON outputs to highlight tracking anomalies (sampled frame counts, first track IDs, warnings).
