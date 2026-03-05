@@ -563,6 +563,9 @@ def run_da3_inference_stream(
     if not frames_bgr:
         return []
 
+    # DA3 expects ndarray inputs in RGB order, while OpenCV/SAM frames are BGR.
+    frames_rgb = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames_bgr]
+
     stream_root = REPO_ROOT / "da3_streaming"
     if str(stream_root) not in sys.path:
         sys.path.insert(0, str(stream_root))
@@ -607,7 +610,7 @@ def run_da3_inference_stream(
             image_dir=f"in_memory/{video_stem}",
             save_dir=str(stream_output_dir),
             config=config,
-            image_arrays=frames_bgr,
+            image_arrays=frames_rgb,
             collect_depth_only=True,
         )
         runner.run()
