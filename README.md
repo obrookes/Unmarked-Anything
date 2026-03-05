@@ -99,6 +99,7 @@ python apps/camera_trap/cli/dap3_cli.py \
 - Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb) (kept for ad-hoc exploration; CLI is the repeatable/default path)
 - Pass `--video-dir` for stem-based auto-resolution and selection from `run_manifest.json`.
 - Use `--video-path` only for direct single-video mode.
+- Use `--depth-source new|old` to choose which depth maps are rendered (`old` expects merged `*_old` keys in NPZ).
 
 Video preprocessing helper:
 - `hpc/scripts/crop_videos.sh` crops a fixed bottom percentage from all videos in a directory (requires `ffmpeg`).
@@ -183,6 +184,45 @@ python apps/camera_trap/cli/visualize_test_output.py \
 Batch naming:
 - `--export-style rgb` writes `<stem>_overlay.mp4`
 - `--export-style analysis-depth` writes `<stem>_analysis_overlay.mp4`
+
+Merge legacy depth maps into a stream NPZ for side-by-side visualization source switching:
+
+```bash
+python hpc/scripts/merge_old_depth_into_stream_npz.py \
+  --old-results-dir da3_streaming/exps/extract_images_/2026-03-04-20-15-48/results_output \
+  --new-path hpc/runs/demo_stream \
+  --video-name 03240068-crop-5fps
+```
+
+This merge also writes per-frame `depth_mask_mean_old` in the per-video JSON, while preserving
+existing `depth_mask_mean`.
+
+Then visualize old maps via:
+
+```bash
+python apps/camera_trap/cli/visualize_test_output.py \
+  --output-root hpc/runs/demo_stream \
+  --video-stem 03240068-crop-5fps \
+  --video-dir assets/videos \
+  --depth-source old \
+  --view both
+```
+
+Plot `depth_mask_mean` (new) vs `depth_mask_mean_old` (merged old):
+
+```bash
+python hpc/scripts/plot_depth_mask_means.py \
+  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
+  --x-axis frame
+```
+
+Plot the mean-depth difference (`depth_mask_mean_old - depth_mask_mean`):
+
+```bash
+python hpc/scripts/plot_depth_mask_mean_diff.py \
+  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
+  --x-axis frame
+```
 
 ## HPC Execution
 

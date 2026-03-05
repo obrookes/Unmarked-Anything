@@ -171,6 +171,46 @@ Summarizes per-video JSON outputs to highlight tracking anomalies (sampled frame
 python hpc/scripts/summarize_track_run.py --run-dir hpc/runs/<run_tag>
 ```
 
+### `hpc/scripts/merge_old_depth_into_stream_npz.py`
+
+Merges legacy `da3_streaming` depth maps (`results_output/frame_<idx>.npz`) into a stream-mode
+`*_arrays.npz` using keys `<existing_depth_key>_old`, so visualization can toggle depth source.
+It also computes per-frame `depth_mask_mean_old` in the per-video JSON while preserving
+existing `depth_mask_mean`.
+
+```bash
+python hpc/scripts/merge_old_depth_into_stream_npz.py \
+  --old-results-dir da3_streaming/exps/extract_images_/2026-03-04-20-15-48/results_output \
+  --new-path hpc/runs/demo_stream \
+  --video-name 03240068-crop-5fps
+```
+
+Use with visualization:
+
+```bash
+python apps/camera_trap/cli/visualize_test_output.py \
+  --output-root hpc/runs/demo_stream \
+  --video-stem 03240068-crop-5fps \
+  --video-dir assets/videos \
+  --depth-source old
+```
+
+Plot old vs new depth-mask mean time series:
+
+```bash
+python hpc/scripts/plot_depth_mask_means.py \
+  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
+  --x-axis frame
+```
+
+Plot only the difference (`depth_mask_mean_old - depth_mask_mean`):
+
+```bash
+python hpc/scripts/plot_depth_mask_mean_diff.py \
+  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
+  --x-axis frame
+```
+
 ## Output conventions
 
 - Single job run dir: `hpc/runs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}`
