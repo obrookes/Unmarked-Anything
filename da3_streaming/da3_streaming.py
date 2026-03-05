@@ -130,7 +130,14 @@ def remove_duplicates(data_list):
 
 
 class DA3_Streaming:
-    def __init__(self, image_dir, save_dir, config):
+    def __init__(
+        self,
+        image_dir,
+        save_dir,
+        config,
+        image_arrays=None,
+        collect_depth_only=False,
+    ):
         self.config = config
 
         self.chunk_size = self.config["Model"]["chunk_size"]
@@ -145,6 +152,7 @@ class DA3_Streaming:
         )
 
         self.img_dir = image_dir
+        self.image_arrays = image_arrays
         self.img_list = None
         self.output_dir = save_dir
 
@@ -162,6 +170,8 @@ class DA3_Streaming:
         self.all_camera_intrinsics = []
 
         self.delete_temp_files = self.config["Model"]["delete_temp_files"]
+        self.collect_depth_only = bool(collect_depth_only)
+        self.depth_results = {} if self.collect_depth_only else None
 
         print("Loading model...")
 
@@ -193,7 +203,10 @@ class DA3_Streaming:
         if self.loop_enable:
             loop_info_save_path = os.path.join(save_dir, "loop_closures.txt")
             self.loop_detector = LoopDetector(
-                image_dir=image_dir, output=loop_info_save_path, config=self.config
+                image_dir=image_dir if image_arrays is None else None,
+                image_arrays=image_arrays,
+                output=loop_info_save_path,
+                config=self.config,
             )
             self.loop_detector.load_model()
 
@@ -205,9 +218,10 @@ class DA3_Streaming:
         return loop_list
 
     def save_depth_conf_result(self, predictions, chunk_idx, s, R, T):
-        if not self.config["Model"]["save_depth_conf_result"]:
+        if not self.config["Model"]["save_depth_conf_result"] and not self.collect_depth_only:
             return
-        os.makedirs(self.result_output_dir, exist_ok=True)
+        if self.config["Model"]["save_depth_conf_result"]:
+            os.makedirs(self.result_output_dir, exist_ok=True)
 
         chunk_start, chunk_end = self.chunk_indices[chunk_idx]
 
@@ -230,24 +244,27 @@ class DA3_Streaming:
             intrinsics = predictions.intrinsics[local_idx]  # [3, 3] float32
 
             filename = f"frame_{global_idx}.npz"
-            filepath = os.path.join(self.result_output_dir, filename)
+            if self.collect_depth_only:
+                self.depth_results[global_idx] = np.asarray(depth, dtype=np.float32).copy()
 
-            if self.config["Model"]["save_debug_info"]:
-                np.savez_compressed(
-                    filepath,
-                    image=image,
-                    depth=depth,
-                    conf=conf,
-                    intrinsics=intrinsics,
-                    extrinsics=predictions.extrinsics[local_idx],
-                    s=s,
-                    R=R,
-                    T=T,
-                )
-            else:
-                np.savez_compressed(
-                    filepath, image=image, depth=depth, conf=conf, intrinsics=intrinsics
-                )
+            if self.config["Model"]["save_depth_conf_result"]:
+                filepath = os.path.join(self.result_output_dir, filename)
+                if self.config["Model"]["save_debug_info"]:
+                    np.savez_compressed(
+                        filepath,
+                        image=image,
+                        depth=depth,
+                        conf=conf,
+                        intrinsics=intrinsics,
+                        extrinsics=predictions.extrinsics[local_idx],
+                        s=s,
+                        R=R,
+                        T=T,
+                    )
+                else:
+                    np.savez_compressed(
+                        filepath, image=image, depth=depth, conf=conf, intrinsics=intrinsics
+                    )
         print("")
 
     def process_single_chunk(self, range_1, chunk_idx=None, range_2=None, is_loop=False):
@@ -671,7 +688,7 @@ class DA3_Streaming:
                     * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"],
                     sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
                 )
-                if self.config["Model"]["save_depth_conf_result"]:
+                if self.config["Model"]["save_depth_conf_result"] or self.collect_depth_only:
                     predictions = chunk_data_first
                     self.save_depth_conf_result(predictions, 0, 1, np.eye(3), np.array([0, 0, 0]))
 
@@ -689,7 +706,7 @@ class DA3_Streaming:
                 sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
             )
 
-            if self.config["Model"]["save_depth_conf_result"]:
+            if self.config["Model"]["save_depth_conf_result"] or self.collect_depth_only:
                 predictions = chunk_data
                 predictions.depth *= s
                 self.save_depth_conf_result(predictions, chunk_idx + 1, s, R, t)
@@ -699,17 +716,39 @@ class DA3_Streaming:
         print("Done.")
 
     def run(self):
-        print(f"Loading images from {self.img_dir}...")
-        self.img_list = sorted(
-            glob.glob(os.path.join(self.img_dir, "*.jpg"))
-            + glob.glob(os.path.join(self.img_dir, "*.png"))
-        )
-        # print(self.img_list)
-        if len(self.img_list) == 0:
-            raise ValueError(f"[DIR EMPTY] No images found in {self.img_dir}!")
-        print(f"Found {len(self.img_list)} images")
+        if self.image_arrays is not None:
+            self.img_list = list(self.image_arrays)
+            if len(self.img_list) == 0:
+                raise ValueError("[EMPTY INPUT] No in-memory images were provided!")
+            print(f"Loaded {len(self.img_list)} in-memory images")
+        else:
+            print(f"Loading images from {self.img_dir}...")
+            self.img_list = sorted(
+                glob.glob(os.path.join(self.img_dir, "*.jpg"))
+                + glob.glob(os.path.join(self.img_dir, "*.png"))
+            )
+            if len(self.img_list) == 0:
+                raise ValueError(f"[DIR EMPTY] No images found in {self.img_dir}!")
+            print(f"Found {len(self.img_list)} images")
 
         self.process_long_sequence()
+
+    def get_collected_depths(self):
+        if not self.collect_depth_only:
+            return None
+        if self.img_list is None:
+            return []
+        output = [None] * len(self.img_list)
+        for idx, depth in self.depth_results.items():
+            if 0 <= idx < len(output):
+                output[idx] = depth
+        missing = [i for i, item in enumerate(output) if item is None]
+        if missing:
+            raise RuntimeError(
+                f"Missing collected depths for frame indices: {missing[:10]}"
+                + ("..." if len(missing) > 10 else "")
+            )
+        return output
 
     def save_camera_poses(self):
         """

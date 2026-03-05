@@ -18,6 +18,9 @@ REPO_ROOT="${REPO_ROOT:-$HOME/Unmarked-Anything}"
 INPUT_VIDEO_DIR="${INPUT_VIDEO_DIR:-$REPO_ROOT/assets/videos}"
 SAM3_MODEL_PATH="${SAM3_MODEL_PATH:-$REPO_ROOT/weights/sam3/safari_checkpoint_hf.pt}"
 SAM3_TEXT_PROMPTS="${SAM3_TEXT_PROMPTS:-ape}"
+DA3_MODEL_ID="${DA3_MODEL_ID:-depth-anything/DA3NESTED-GIANT-LARGE}"
+DA3_MODE="${DA3_MODE:-batch}"
+DA3_STREAM_CONFIG="${DA3_STREAM_CONFIG:-$REPO_ROOT/da3_streaming/configs/base_config.yaml}"
 TARGET_FPS="${TARGET_FPS:-1.0}"
 SAM3_MODE="${SAM3_MODE:-track}"
 DEVICE="${DEVICE:-auto}"
@@ -38,6 +41,17 @@ if [[ -z "$DA3_BATCH_SIZE" ]]; then
 fi
 if ! [[ "$DA3_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid DA3_BATCH_SIZE '$DA3_BATCH_SIZE'. Must be a positive integer." >&2
+  exit 1
+fi
+case "$DA3_MODE" in
+  batch|stream) ;;
+  *)
+    echo "Invalid DA3_MODE '$DA3_MODE'. Must be batch or stream." >&2
+    exit 1
+    ;;
+esac
+if [[ "$DA3_MODE" == "stream" && ! -f "$DA3_STREAM_CONFIG" ]]; then
+  echo "DA3 stream config not found: $DA3_STREAM_CONFIG" >&2
   exit 1
 fi
 case "$SAM3_TRACK_ISOLATION" in
@@ -83,10 +97,15 @@ CMD=(
   --output-dir "$WORK_OUTPUT_DIR"
   --sam3-model-path "$SAM3_MODEL_PATH"
   --sam3-text-prompts "${PROMPTS[@]}"
+  --da3-model-id "$DA3_MODEL_ID"
+  --da3-mode "$DA3_MODE"
   --target-fps "$TARGET_FPS"
   --sam3-mode "$SAM3_MODE"
   --device "$DEVICE"
 )
+if [[ "$DA3_MODE" == "stream" ]]; then
+  CMD+=(--da3-stream-config "$DA3_STREAM_CONFIG")
+fi
 
 if [[ "$USE_HALF" == "1" ]]; then
   CMD+=(--half)

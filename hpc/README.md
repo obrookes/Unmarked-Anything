@@ -39,7 +39,8 @@ sbatch --export=ALL,\
 REPO_ROOT=$HOME/Unmarked-Anything,\
 INPUT_VIDEO_DIR=$HOME/data/camera_trap/videos,\
 SAM3_MODEL_PATH=$HOME/models/safari_checkpoint_hf.pt,\
-SAM3_TEXT_PROMPTS=ape,baboon,\
+SAM3_TEXT_PROMPTS=ape,baboon,DA3_MODEL_ID=depth-anything/DA3NESTED-GIANT-LARGE,\
+DA3_MODE=stream,DA3_STREAM_CONFIG=$HOME/Unmarked-Anything/da3_streaming/configs/base_config.yaml,\
 TARGET_FPS=1.0,SAM3_MODE=track,DEVICE=auto,USE_HALF=1,OVERWRITE=0,MAX_VIDEOS=,DA3_BATCH_SIZE=4,\
 SAM3_TRACK_ISOLATION=recreate,SAM3_TRACK_TAIL_POLICY=warn_and_finalize,\
 OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
@@ -56,16 +57,18 @@ OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
 2. `sam3_model_path`
 3. `sam3_text_prompts_csv`
 4. `da3_model_id`
-5. `target_fps`
-6. `sam3_mode`
-7. `device`
-8. `conf`
-9. `use_half` (`0`/`1`)
-10. `overwrite` (`0`/`1`)
-11. `max_videos` (optional)
-12. `da3_batch_size` (required, positive integer)
-13. `sam3_track_isolation` (optional: `recreate`, `reset`, `both`; default `recreate`)
-14. `sam3_track_tail_policy` (optional: `warn_and_finalize`, `fail_fast`; default `warn_and_finalize`)
+5. `da3_mode` (optional: `batch`, `stream`; default `batch`)
+6. `da3_stream_config` (optional path; used in stream mode)
+7. `target_fps`
+8. `sam3_mode`
+9. `device`
+10. `conf`
+11. `use_half` (`0`/`1`)
+12. `overwrite` (`0`/`1`)
+13. `max_videos` (optional)
+14. `da3_batch_size` (required, positive integer)
+15. `sam3_track_isolation` (optional: `recreate`, `reset`, `both`; default `recreate`)
+16. `sam3_track_tail_policy` (optional: `warn_and_finalize`, `fail_fast`; default `warn_and_finalize`)
 
 Notes:
 - Comment lines start with `#`.
@@ -75,6 +78,7 @@ Notes:
 - `job_tag` is generated automatically from SAM3 model, DA3 model, prompts, fps, and mode.
 - For model-based tags, only model identifiers/basenames are used (not full filesystem paths).
 - `da3_batch_size` is passed through directly to the CLI and must be a positive integer.
+- `da3_mode=stream` runs in-memory DA3-Streaming on all sampled frames and requires a valid `da3_stream_config`.
 - `sam3_track_isolation` and `sam3_track_tail_policy` are only relevant when `sam3_mode=track`.
 
 ### 2) Submit array
@@ -170,7 +174,7 @@ python hpc/scripts/summarize_track_run.py --run-dir hpc/runs/<run_tag>
 ## Output conventions
 
 - Single job run dir: `hpc/runs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}`
-- Array run dir: `hpc/runs/${SLURM_JOB_NAME}-${sam3basename}-${da3model}-${prompt}-fps${fps}-${mode}-${SLURM_ARRAY_TASK_ID}-${SLURM_JOB_ID}`
+- Array run dir: `hpc/runs/${SLURM_JOB_NAME}-${sam3basename}-${da3model}-${da3mode}-${prompt}-fps${fps}-${mode}-${SLURM_ARRAY_TASK_ID}-${SLURM_JOB_ID}`
 - Logs:
   - single: `hpc/logs/slurm/%x-%j.out|err`
   - array: `hpc/logs/slurm/%x-%A_%a.out|err`

@@ -19,6 +19,7 @@ import os
 import sys
 from pathlib import Path
 import faiss
+import numpy as np
 import torch
 import torchvision.transforms as T
 from PIL import Image
@@ -74,7 +75,7 @@ class VPRModel(nn.Module):
 class LoopDetector:
     """Loop detector class for detecting loop closures in image sequences"""
 
-    def __init__(self, image_dir, output="loop_closures.txt", config=None):
+    def __init__(self, image_dir=None, image_arrays=None, output="loop_closures.txt", config=None):
         """Initialize the loop detector
 
         Args:
@@ -90,6 +91,7 @@ class LoopDetector:
         """
         self.config = config
         self.image_dir = image_dir
+        self.image_arrays = image_arrays
         self.ckpt_path = self.config["Weights"]["SALAD"]
         self.image_size = self.config["Loop"]["SALAD"]["image_size"]
         self.batch_size = self.config["Loop"]["SALAD"]["batch_size"]
@@ -104,6 +106,8 @@ class LoopDetector:
         self.image_paths = None
         self.descriptors = None
         self.loop_closures = None
+        if self.image_dir is None and self.image_arrays is None:
+            raise ValueError("LoopDetector requires image_dir or image_arrays.")
 
     def _input_transform(self, image_size=None):
         """Create image transformation function"""
@@ -150,6 +154,10 @@ class LoopDetector:
 
     def get_image_paths(self):
         """Get paths of all image files in directory"""
+        if self.image_arrays is not None:
+            self.image_paths = [f"in_memory_{i:06d}" for i in range(len(self.image_arrays))]
+            return self.image_paths
+
         image_extensions = [".jpg", ".jpeg", ".png"]
         image_paths = []
 
@@ -172,15 +180,27 @@ class LoopDetector:
         transform = self._input_transform(self.image_size)
         descriptors = []
 
-        for i in tqdm(
-            range(0, len(self.image_paths), self.batch_size), desc="Extracting features"
-        ):
+        for i in tqdm(range(0, len(self.image_paths), self.batch_size), desc="Extracting features"):
             batch_paths = self.image_paths[i : i + self.batch_size]
             batch_imgs = []
 
-            for path in batch_paths:
+            for j, path in enumerate(batch_paths):
                 try:
-                    img = Image.open(path).convert("RGB")
+                    if self.image_arrays is not None:
+                        arr = np.asarray(self.image_arrays[i + j])
+                        arr_u8 = arr
+                        if arr_u8.dtype != np.uint8:
+                            arr_u8 = np.clip(arr_u8, 0, 255).astype(np.uint8, copy=False)
+                        if arr_u8.ndim == 2:
+                            arr_u8 = arr_u8[:, :, None]
+                        if arr_u8.ndim == 3 and arr_u8.shape[2] == 1:
+                            arr_u8 = arr_u8.repeat(3, axis=2)
+                        if arr_u8.ndim != 3 or arr_u8.shape[2] != 3:
+                            raise ValueError(f"Invalid image array shape: {arr_u8.shape}")
+                        # Arrays come from OpenCV in BGR.
+                        img = Image.fromarray(arr_u8[:, :, ::-1]).convert("RGB")
+                    else:
+                        img = Image.open(path).convert("RGB")
                     img = transform(img)
                     batch_imgs.append(img)
                 except Exception as e:

@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -35,6 +36,7 @@ except ImportError:
 DEFAULT_VIDEO_EXTS = ".mp4,.mov,.avi,.mkv"
 TRACK_ISOLATION_CHOICES = ("recreate", "reset", "both")
 TRACK_TAIL_POLICY_CHOICES = ("warn_and_finalize", "fail_fast")
+DA3_MODE_CHOICES = ("batch", "stream")
 
 
 def utc_now_iso() -> str:
@@ -45,7 +47,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Batch pipeline: sample frames from videos, run SAM3 segmentation with text prompts, "
-            "then run Depth Anything 3 only on SAM3-positive frames."
+            "then run Depth Anything 3 with either batch inference or DA3-Streaming."
         )
     )
     parser.add_argument(
@@ -74,6 +76,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--da3-model-id",
         default="depth-anything/DA3NESTED-GIANT-LARGE",
         help="Depth Anything 3 model ID.",
+    )
+    parser.add_argument(
+        "--da3-mode",
+        choices=DA3_MODE_CHOICES,
+        default="batch",
+        help="DA3 execution mode: standard batched inference ('batch') or DA3-Streaming ('stream').",
+    )
+    parser.add_argument(
+        "--da3-stream-config",
+        default=str(REPO_ROOT / "da3_streaming" / "configs" / "base_config.yaml"),
+        help="Path to DA3-Streaming config YAML used when --da3-mode stream.",
     )
     parser.add_argument("--target-fps", type=float, default=1.0, help="Sampling rate for processing.")
     parser.add_argument(
@@ -109,7 +122,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--da3-batch-size",
         type=int,
         required=True,
-        help="DA3 batch size for SAM-positive sampled frames.",
+        help=(
+            "Positive integer required by CLI. In batch mode this is DA3 batch size for "
+            "SAM-positive sampled frames; in stream mode it is retained for compatibility/progress."
+        ),
     )
     parser.add_argument(
         "--sam3-track-isolation",
@@ -537,6 +553,78 @@ def run_da3_inference_batch(da3: DepthAnything3, frames_bgr: list[np.ndarray]) -
     return [np.asarray(depth_map, dtype=np.float32) for depth_map in depth_pred.depth]
 
 
+def run_da3_inference_stream(
+    *,
+    frames_bgr: list[np.ndarray],
+    stream_config_path: Path,
+    video_out_dir: Path,
+    video_stem: str,
+) -> list[np.ndarray]:
+    if not frames_bgr:
+        return []
+
+    stream_root = REPO_ROOT / "da3_streaming"
+    if str(stream_root) not in sys.path:
+        sys.path.insert(0, str(stream_root))
+
+    import da3_streaming as da3_streaming_module
+    from loop_utils.config_utils import load_config as load_stream_config
+
+    if not stream_config_path.is_file():
+        raise FileNotFoundError(f"DA3-Streaming config not found: {stream_config_path}")
+
+    config = load_stream_config(str(stream_config_path))
+    config["Model"]["save_depth_conf_result"] = False
+
+    def _resolve_stream_path(path_value: str) -> str:
+        raw = str(path_value)
+        candidate = Path(raw)
+        if candidate.is_absolute() and candidate.exists():
+            return str(candidate)
+        normalized = raw[2:] if raw.startswith("./") else raw
+        candidates = [
+            stream_root / normalized,
+            stream_config_path.parent / normalized,
+            REPO_ROOT / normalized,
+        ]
+        for item in candidates:
+            if item.exists():
+                return str(item)
+        return raw
+
+    for weight_key in ("DA3", "DA3_CONFIG", "SALAD"):
+        if weight_key in config.get("Weights", {}):
+            config["Weights"][weight_key] = _resolve_stream_path(config["Weights"][weight_key])
+
+    stream_output_dir = video_out_dir / "_da3_streaming_tmp"
+    if stream_output_dir.exists():
+        shutil.rmtree(stream_output_dir)
+    stream_output_dir.mkdir(parents=True, exist_ok=True)
+
+    runner = None
+    try:
+        runner = da3_streaming_module.DA3_Streaming(
+            image_dir=f"in_memory/{video_stem}",
+            save_dir=str(stream_output_dir),
+            config=config,
+            image_arrays=frames_bgr,
+            collect_depth_only=True,
+        )
+        runner.run()
+        depth_batch = runner.get_collected_depths()
+    finally:
+        if runner is not None:
+            try:
+                runner.close()
+            finally:
+                del runner
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        shutil.rmtree(stream_output_dir, ignore_errors=True)
+
+    return [np.asarray(depth_map, dtype=np.float32) for depth_map in depth_batch]
+
+
 def base_frame_record(frame_index: int, timestamp_sec: float | None) -> dict[str, Any]:
     return {
         "frame_index": int(frame_index),
@@ -629,7 +717,8 @@ def process_video(
     args: argparse.Namespace,
     sam3_frame: SAM3SemanticPredictor | None,
     sam3_track: Any,
-    da3: DepthAnything3,
+    da3: DepthAnything3 | None,
+    da3_stream_config: Path,
     prompt_slugs: list[str],
     device: torch.device,
     da3_batch_size: int,
@@ -684,7 +773,9 @@ def process_video(
         "sam3_track_tail_policy": args.sam3_track_tail_policy if args.sam3_mode == "track" else None,
         "sam3_track_setup_actions": list(track_setup_actions or []),
         "sam3_tracker_num_frames": None,
+        "da3_mode": args.da3_mode,
         "da3_model_id": args.da3_model_id,
+        "da3_stream_config": str(da3_stream_config.resolve()) if args.da3_mode == "stream" else None,
         "da3_batch_size": int(da3_batch_size),
         "device": str(device),
         "started_at_utc": started_at,
@@ -775,11 +866,14 @@ def process_video(
         counts["processed_frames"] += 1
 
     pending_da3: list[dict[str, Any]] = []
+    sampled_frames_bgr: list[np.ndarray] = []
 
     def flush_pending_da3() -> None:
         nonlocal pending_da3
         if not pending_da3:
             return
+        if da3 is None:
+            raise RuntimeError("DA3 batch model is not initialized.")
         batch_start = time.perf_counter()
         frames_bgr = [item["frame_bgr"] for item in pending_da3]
         try:
@@ -810,6 +904,62 @@ def process_video(
                 rec["timing_ms"]["total_ms"] = (time.perf_counter() - item["frame_start"]) * 1000.0
                 frame_rows.append(rec)
                 counts["error_frames"] += 1
+        finally:
+            pending_da3 = []
+
+    def flush_da3_stream_inference() -> None:
+        nonlocal pending_da3
+        if not sampled_frames_bgr:
+            pending_da3 = []
+            return
+        batch_start = time.perf_counter()
+        try:
+            depth_batch = run_da3_inference_stream(
+                frames_bgr=sampled_frames_bgr,
+                stream_config_path=da3_stream_config,
+                video_out_dir=video_out_dir,
+                video_stem=video_stem,
+            )
+            if len(depth_batch) != len(sampled_frames_bgr):
+                raise RuntimeError(
+                    f"DA3-Streaming returned {len(depth_batch)} depth maps for "
+                    f"{len(sampled_frames_bgr)} sampled frames."
+                )
+
+            batch_ms = (time.perf_counter() - batch_start) * 1000.0
+            per_frame_da3_ms = batch_ms / max(1, len(sampled_frames_bgr))
+            for item in pending_da3:
+                sample_seq_idx = int(item["sample_seq_idx"])
+                if sample_seq_idx < 0 or sample_seq_idx >= len(depth_batch):
+                    raise RuntimeError(
+                        f"Sample index out of range for DA3-Streaming depth output: {sample_seq_idx}"
+                    )
+                depth = depth_batch[sample_seq_idx]
+                finalize_record(
+                    item["rec"],
+                    frame_idx=item["frame_idx"],
+                    depth=depth,
+                    union_mask_bool=item["union_mask_bool"],
+                    center_xy=item["center_xy"],
+                    prompt_masks=item["prompt_masks"],
+                    object_entries=item["object_entries"],
+                    frame_start=item["frame_start"],
+                    da3_ms=per_frame_da3_ms,
+                )
+        except Exception as exc:
+            if pending_da3:
+                for item in pending_da3:
+                    rec = item["rec"]
+                    rec["status"] = "da3_error"
+                    rec["error"] = f"{type(exc).__name__}: {exc}"
+                    rec["timing_ms"]["total_ms"] = (time.perf_counter() - item["frame_start"]) * 1000.0
+                    frame_rows.append(rec)
+                    counts["error_frames"] += 1
+            else:
+                video_json["warnings"].append(
+                    f"DA3-Streaming inference failed with no pending detections: "
+                    f"{type(exc).__name__}: {exc}"
+                )
         finally:
             pending_da3 = []
 
@@ -900,6 +1050,8 @@ def process_video(
 
                     counts["sampled_frames"] += 1
                     update_batch_progress()
+                    sample_seq_idx = len(sampled_frames_bgr)
+                    sampled_frames_bgr.append(frame_bgr)
                     timestamp = float(frame_idx / video_fps) if video_fps > 0 else None
                     rec = base_frame_record(frame_idx, timestamp)
                     rec["sam3_mode"] = "frame"
@@ -946,8 +1098,9 @@ def process_video(
                     pending_da3.append(
                         {
                             "frame_idx": frame_idx,
+                            "sample_seq_idx": sample_seq_idx,
                             "rec": rec,
-                            "frame_bgr": frame_bgr,
+                            "frame_bgr": frame_bgr if args.da3_mode == "batch" else None,
                             "union_mask_bool": union_mask_bool,
                             "center_xy": center_xy,
                             "prompt_masks": prompt_masks,
@@ -955,7 +1108,7 @@ def process_video(
                             "frame_start": frame_start,
                         }
                     )
-                    if len(pending_da3) >= da3_batch_size:
+                    if args.da3_mode == "batch" and len(pending_da3) >= da3_batch_size:
                         flush_pending_da3()
                     frame_idx += 1
             finally:
@@ -1027,6 +1180,8 @@ def process_video(
                     frame_bgr = getattr(sam_result, "orig_img", None)
                     if frame_bgr is None:
                         raise RuntimeError("SAM3 track result did not include orig_img.")
+                    sample_seq_idx = len(sampled_frames_bgr)
+                    sampled_frames_bgr.append(frame_bgr)
 
                     prompt_masks, object_entries = extract_prompt_masks_and_objects(
                         sam_result,
@@ -1063,8 +1218,9 @@ def process_video(
                 pending_da3.append(
                     {
                         "frame_idx": frame_idx,
+                        "sample_seq_idx": sample_seq_idx,
                         "rec": rec,
-                        "frame_bgr": frame_bgr,
+                        "frame_bgr": frame_bgr if args.da3_mode == "batch" else None,
                         "union_mask_bool": union_mask_bool,
                         "center_xy": center_xy,
                         "prompt_masks": prompt_masks,
@@ -1072,10 +1228,13 @@ def process_video(
                         "frame_start": frame_start,
                     }
                 )
-                if len(pending_da3) >= da3_batch_size:
+                if args.da3_mode == "batch" and len(pending_da3) >= da3_batch_size:
                     flush_pending_da3()
 
-        flush_pending_da3()
+        if args.da3_mode == "stream":
+            flush_da3_stream_inference()
+        else:
+            flush_pending_da3()
         write_npz_atomic(npz_path, npz_arrays)
         video_json["status"] = "success"
     except Exception as exc:
@@ -1124,8 +1283,13 @@ def main() -> None:
     use_half = args.half and device.type == "cuda"
     prompt_slugs = build_prompt_slugs(args.sam3_text_prompts)
     da3_batch_size = int(args.da3_batch_size)
+    da3_stream_config = Path(args.da3_stream_config)
+    if args.da3_mode == "stream" and not da3_stream_config.is_file():
+        raise FileNotFoundError(f"DA3-Streaming config not found: {da3_stream_config}")
 
-    da3 = DepthAnything3.from_pretrained(args.da3_model_id).to(device)
+    da3: DepthAnything3 | None = None
+    if args.da3_mode == "batch":
+        da3 = DepthAnything3.from_pretrained(args.da3_model_id).to(device)
     sam3_overrides = dict(
         conf=args.conf,
         task="segment",
@@ -1159,7 +1323,9 @@ def main() -> None:
         "sam3_track_tail_policy": args.sam3_track_tail_policy if args.sam3_mode == "track" else None,
         "sam3_model_path": str(Path(args.sam3_model_path).resolve()),
         "sam3_prompts": list(args.sam3_text_prompts),
+        "da3_mode": args.da3_mode,
         "da3_model_id": args.da3_model_id,
+        "da3_stream_config": str(da3_stream_config.resolve()) if args.da3_mode == "stream" else None,
         "da3_batch_size": int(da3_batch_size),
         "device": str(device),
         "overwrite": bool(args.overwrite),
@@ -1205,6 +1371,7 @@ def main() -> None:
             sam3_frame=sam3_frame,
             sam3_track=current_sam3_track,
             da3=da3,
+            da3_stream_config=da3_stream_config,
             prompt_slugs=prompt_slugs,
             device=device,
             da3_batch_size=da3_batch_size,
