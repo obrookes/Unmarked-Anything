@@ -611,6 +611,7 @@ def run_da3_inference_stream(
             save_dir=str(stream_output_dir),
             config=config,
             image_arrays=frames_rgb,
+            image_arrays_color_order="rgb",
             collect_depth_only=True,
         )
         runner.run()

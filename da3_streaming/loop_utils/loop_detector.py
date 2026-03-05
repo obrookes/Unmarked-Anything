@@ -75,7 +75,14 @@ class VPRModel(nn.Module):
 class LoopDetector:
     """Loop detector class for detecting loop closures in image sequences"""
 
-    def __init__(self, image_dir=None, image_arrays=None, output="loop_closures.txt", config=None):
+    def __init__(
+        self,
+        image_dir=None,
+        image_arrays=None,
+        output="loop_closures.txt",
+        config=None,
+        image_arrays_color_order="bgr",
+    ):
         """Initialize the loop detector
 
         Args:
@@ -100,6 +107,12 @@ class LoopDetector:
         self.use_nms = self.config["Loop"]["SALAD"]["use_nms"]
         self.nms_threshold = self.config["Loop"]["SALAD"]["nms_threshold"]
         self.output = output
+        self.image_arrays_color_order = str(image_arrays_color_order).strip().lower()
+        if self.image_arrays_color_order not in {"bgr", "rgb"}:
+            raise ValueError(
+                "image_arrays_color_order must be 'bgr' or 'rgb', "
+                f"got: {image_arrays_color_order!r}"
+            )
 
         self.model = None
         self.device = None
@@ -197,8 +210,11 @@ class LoopDetector:
                             arr_u8 = arr_u8.repeat(3, axis=2)
                         if arr_u8.ndim != 3 or arr_u8.shape[2] != 3:
                             raise ValueError(f"Invalid image array shape: {arr_u8.shape}")
-                        # Arrays come from OpenCV in BGR.
-                        img = Image.fromarray(arr_u8[:, :, ::-1]).convert("RGB")
+                        if self.image_arrays_color_order == "bgr":
+                            arr_rgb = arr_u8[:, :, ::-1]
+                        else:
+                            arr_rgb = arr_u8
+                        img = Image.fromarray(arr_rgb).convert("RGB")
                     else:
                         img = Image.open(path).convert("RGB")
                     img = transform(img)

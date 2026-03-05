@@ -136,6 +136,7 @@ class DA3_Streaming:
         save_dir,
         config,
         image_arrays=None,
+        image_arrays_color_order="bgr",
         collect_depth_only=False,
     ):
         self.config = config
@@ -153,6 +154,7 @@ class DA3_Streaming:
 
         self.img_dir = image_dir
         self.image_arrays = image_arrays
+        self.image_arrays_color_order = str(image_arrays_color_order).strip().lower()
         self.img_list = None
         self.output_dir = save_dir
 
@@ -207,6 +209,7 @@ class DA3_Streaming:
                 image_arrays=image_arrays,
                 output=loop_info_save_path,
                 config=self.config,
+                image_arrays_color_order=self.image_arrays_color_order,
             )
             self.loop_detector.load_model()
 
