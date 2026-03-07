@@ -7,6 +7,7 @@ This directory contains cluster-oriented job scripts and helpers for running `da
 - `jobs/`: SLURM batch scripts.
   - `dap3_predict_ape.sh`: single-job template with sensible defaults.
   - `dap3_predict_array.sh`: array-job script driven by a TSV manifest.
+  - `dap3_export_overlays_array.sh`: dependent export job for headless overlay video generation.
 - `configs/`: job configuration inputs.
   - `job_manifest.tsv`: one array task per non-comment row.
 - `scripts/`: helper utilities for submit/monitor/result collection.
@@ -95,6 +96,29 @@ hpc/scripts/submit_array.sh hpc/jobs/dap3_predict_array.sh hpc/configs/job_manif
 
 The helper auto-counts runnable manifest rows and submits `--array=1-N`.
 
+### 3) Submit array + automatic headless overlay export
+
+This workflow submits the prediction array, then submits a dependent export job that runs
+`visualize_test_output.py` in `--no-gui --export-all` mode for all run directories matching
+`*-${predict_array_job_id}` under `OUTPUT_ROOT`.
+
+```bash
+hpc/scripts/submit_array_with_export.sh
+```
+
+Optional overrides:
+
+```bash
+OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs \
+EXPORT_STYLE=analysis-depth \
+DEPTH_SOURCE=new \
+EXPORT_SUBDIR=overlay_videos \
+EXPORT_DEPENDENCY=afterok \
+hpc/scripts/submit_array_with_export.sh hpc/jobs/dap3_predict_array.sh hpc/configs/job_manifest.tsv
+```
+
+Current status: these new automation scripts are not yet tested on Isambard and need to be ported/validated there.
+
 ## Helper Scripts
 
 ### `hpc/scripts/submit_all.sh`
@@ -112,6 +136,23 @@ Submits `dap3_predict_array.sh` with size inferred from manifest.
 ```bash
 hpc/scripts/submit_array.sh
 ```
+
+### `hpc/scripts/submit_array_with_export.sh`
+
+Submits `dap3_predict_array.sh`, captures the array job id, then submits
+`hpc/jobs/dap3_export_overlays_array.sh` with an SLURM dependency (`afterok` by default).
+
+```bash
+hpc/scripts/submit_array_with_export.sh
+```
+
+Key environment overrides:
+- `EXPORT_DEPENDENCY` (`afterok` or `afterany`)
+- `EXPORT_STYLE` (`rgb` or `analysis-depth`)
+- `DEPTH_SOURCE` (`new` or `old`)
+- `EXPORT_SUBDIR` (default `overlay_videos`)
+- `VIDEO_DIR_OVERRIDE` (force source video directory)
+- `EXPORT_FPS` and `EXPORT_FOURCC`
 
 ### `hpc/scripts/monitor_jobs.sh`
 
