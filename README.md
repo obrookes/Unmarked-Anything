@@ -185,10 +185,12 @@ Batch naming:
 - `--export-style rgb` writes `<stem>_overlay.mp4`
 - `--export-style analysis-depth` writes `<stem>_analysis_overlay.mp4`
 
+Depth analysis helpers now live in `apps/camera_trap/scripts` (not `hpc/scripts`) since they are reusable locally and on HPC.
+
 Merge legacy depth maps into a stream NPZ for side-by-side visualization source switching:
 
 ```bash
-python hpc/scripts/merge_old_depth_into_stream_npz.py \
+python apps/camera_trap/scripts/merge_old_depth_into_stream_npz.py \
   --old-results-dir da3_streaming/exps/extract_images_/2026-03-04-20-15-48/results_output \
   --new-path hpc/runs/demo_stream \
   --video-name 03240068-crop-5fps
@@ -211,16 +213,29 @@ python apps/camera_trap/cli/visualize_test_output.py \
 Plot `depth_mask_mean` (new) vs `depth_mask_mean_old` (merged old):
 
 ```bash
-python hpc/scripts/plot_depth_mask_means.py \
+python apps/camera_trap/scripts/plot_depth_metrics.py \
   --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
+  --mode mask_means \
   --x-axis frame
 ```
 
 Plot the mean-depth difference (`depth_mask_mean_old - depth_mask_mean`):
 
 ```bash
-python hpc/scripts/plot_depth_mask_mean_diff.py \
+python apps/camera_trap/scripts/plot_depth_metrics.py \
   --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
+  --mode mask_diff \
+  --x-axis frame
+```
+
+Plot per-track-ID mean depth (from object masks) using new and old merged depth maps:
+
+```bash
+python apps/camera_trap/scripts/plot_depth_metrics.py \
+  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
+  --mode id_means \
+  --id-depth-source both \
+  --max-ids 20 \
   --x-axis frame
 ```
 

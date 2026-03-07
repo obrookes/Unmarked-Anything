@@ -14,10 +14,10 @@ from typing import Any
 
 import cv2
 import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 OLD_FRAME_RE = re.compile(r"^frame_(\d+)\.npz$")
 
