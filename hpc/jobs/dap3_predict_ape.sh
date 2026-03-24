@@ -44,9 +44,9 @@ if ! [[ "$DA3_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 case "$DA3_MODE" in
-  batch|stream) ;;
+  batch|stream|all_frames) ;;
   *)
-    echo "Invalid DA3_MODE '$DA3_MODE'. Must be batch or stream." >&2
+    echo "Invalid DA3_MODE '$DA3_MODE'. Must be batch, stream, or all_frames." >&2
     exit 1
     ;;
 esac

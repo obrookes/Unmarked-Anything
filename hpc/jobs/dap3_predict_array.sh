@@ -49,7 +49,7 @@ IFS=$'\t' read -r -a F <<< "$LINE"
 # 2 sam3_model_path
 # 3 sam3_text_prompts_csv
 # 4 da3_model_id
-# 5 da3_mode (optional: batch|stream, default batch)
+# 5 da3_mode (optional: batch|stream|all_frames, default batch)
 # 6 da3_stream_config (optional path, used in stream mode)
 # 7 target_fps
 # 8 sam3_mode
@@ -88,10 +88,10 @@ if ! [[ "$DA3_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 case "$DA3_MODE" in
-  batch|stream) ;;
+  batch|stream|all_frames) ;;
   *)
     echo "Invalid da3_mode '$DA3_MODE' in manifest line: $LINE" >&2
-    echo "da3_mode must be one of: batch, stream." >&2
+    echo "da3_mode must be one of: batch, stream, all_frames." >&2
     exit 1
     ;;
 esac

@@ -58,7 +58,7 @@ OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
 2. `sam3_model_path`
 3. `sam3_text_prompts_csv`
 4. `da3_model_id`
-5. `da3_mode` (optional: `batch`, `stream`; default `batch`)
+5. `da3_mode` (optional: `batch`, `stream`, `all_frames`; default `batch`)
 6. `da3_stream_config` (optional path; used in stream mode)
 7. `target_fps`
 8. `sam3_mode`
@@ -80,6 +80,7 @@ Notes:
 - For model-based tags, only model identifiers/basenames are used (not full filesystem paths).
 - `da3_batch_size` is passed through directly to the CLI and must be a positive integer.
 - `da3_mode=stream` runs in-memory DA3-Streaming on all sampled frames and requires a valid `da3_stream_config`.
+- `da3_mode=all_frames` runs standard DA3 on all sampled frames in memory; output persistence remains SAM-positive (`processed`) frames.
 - `sam3_track_isolation` and `sam3_track_tail_policy` are only relevant when `sam3_mode=track`.
 
 ### 2) Submit array

@@ -91,6 +91,18 @@ python apps/camera_trap/cli/dap3_cli.py \
   --da3-batch-size 4
 ```
 
+All-frames mode example (standard DA3 on all sampled frames; persist depth only for SAM-positive frames):
+
+```bash
+python apps/camera_trap/cli/dap3_cli.py \
+  --input-video-dir assets/videos \
+  --output-dir outputs/demo_all_frames \
+  --sam3-model-path weights/sam3/safari_checkpoint_hf.pt \
+  --sam3-text-prompts animal \
+  --da3-mode all_frames \
+  --da3-batch-size 4
+```
+
 ## Sample Data
 
 - Input video: `assets/videos/demo.MP4`
@@ -270,9 +282,9 @@ python apps/camera_trap/cli/dap3_cli.py \
 | `--sam3-model-path` | path | yes | - | Path to SAM3 checkpoint (`.pt`). |
 | `--sam3-text-prompts` | list of strings | yes | - | One or more global SAM3 text prompts. |
 | `--da3-model-id` | string | no | `depth-anything/DA3NESTED-GIANT-LARGE` | DA3 pretrained model ID. |
-| `--da3-mode` | enum | no | `batch` | DA3 execution mode: `batch` (legacy batched DA3 on SAM-positive frames) or `stream` (DA3-Streaming on all sampled frames). |
+| `--da3-mode` | enum | no | `batch` | DA3 execution mode: `batch` (batched DA3 on SAM-positive frames), `stream` (DA3-Streaming on all sampled frames), or `all_frames` (standard DA3 on all sampled frames). |
 | `--da3-stream-config` | path | no | `da3_streaming/configs/base_config.yaml` | DA3-Streaming YAML config path (used when `--da3-mode stream`). |
-| `--da3-batch-size` | int | yes | - | Positive integer required by CLI. In `batch` mode it is the DA3 batch size; in `stream` mode it is retained for compatibility/progress accounting. |
+| `--da3-batch-size` | int | yes | - | Positive integer required by CLI. In `batch` mode it is the DA3 batch size; in `stream` and `all_frames` modes it is retained for compatibility/progress accounting. |
 | `--target-fps` | float | no | `1.0` | Sampling rate for processing. Must be `> 0`. |
 | `--sam3-mode` | enum | no | `track` | `track` (video tracking) or `frame` (per-frame segmentation). |
 | `--conf` | float | no | `0.25` | SAM3 confidence threshold. |
@@ -297,6 +309,7 @@ Per-frame status values include: `processed`, `empty_mask`, `sam_error`, `da3_er
 - `target_fps` is implemented as frame stride (`round(video_fps / target_fps)`, minimum 1).
 - Non-overwrite mode skips videos that already have both expected output files.
 - `--da3-mode stream` runs DA3-Streaming in memory on all sampled frames; SAM outputs still control which frames are persisted as `processed` in JSON/NPZ.
+- `--da3-mode all_frames` runs standard DA3 in memory on all sampled frames; persisted depth storage remains aligned to `processed` (SAM-positive) frame rows.
 - If `--sam3-mode track` is unavailable in your ultralytics build, use `--sam3-mode frame`.
 - Default `--sam3-track-isolation recreate` prevents cross-video tracker state leakage in multi-video runs.
 - Use `hpc/scripts/summarize_track_run.py --run-dir <run>` for a quick forensic summary of per-video frame counts and track IDs.

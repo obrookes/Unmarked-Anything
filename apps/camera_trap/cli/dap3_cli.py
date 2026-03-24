@@ -36,7 +36,7 @@ except ImportError:
 DEFAULT_VIDEO_EXTS = ".mp4,.mov,.avi,.mkv"
 TRACK_ISOLATION_CHOICES = ("recreate", "reset", "both")
 TRACK_TAIL_POLICY_CHOICES = ("warn_and_finalize", "fail_fast")
-DA3_MODE_CHOICES = ("batch", "stream")
+DA3_MODE_CHOICES = ("batch", "stream", "all_frames")
 
 
 def utc_now_iso() -> str:
@@ -81,7 +81,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--da3-mode",
         choices=DA3_MODE_CHOICES,
         default="batch",
-        help="DA3 execution mode: standard batched inference ('batch') or DA3-Streaming ('stream').",
+        help=(
+            "DA3 execution mode: standard batched inference on SAM-positive frames ('batch'), "
+            "DA3-Streaming on all sampled frames ('stream'), or standard DA3 on all sampled "
+            "frames ('all_frames')."
+        ),
     )
     parser.add_argument(
         "--da3-stream-config",
@@ -967,6 +971,60 @@ def process_video(
         finally:
             pending_da3 = []
 
+    def flush_da3_all_frames_inference() -> None:
+        nonlocal pending_da3
+        if not sampled_frames_bgr:
+            pending_da3 = []
+            return
+        if da3 is None:
+            raise RuntimeError("DA3 batch model is not initialized.")
+
+        batch_start = time.perf_counter()
+        try:
+            depth_batch = run_da3_inference_batch(da3, sampled_frames_bgr)
+            if len(depth_batch) != len(sampled_frames_bgr):
+                raise RuntimeError(
+                    f"DA3 returned {len(depth_batch)} depth maps for "
+                    f"{len(sampled_frames_bgr)} sampled frames."
+                )
+
+            batch_ms = (time.perf_counter() - batch_start) * 1000.0
+            per_frame_da3_ms = batch_ms / max(1, len(sampled_frames_bgr))
+            for item in pending_da3:
+                sample_seq_idx = int(item["sample_seq_idx"])
+                if sample_seq_idx < 0 or sample_seq_idx >= len(depth_batch):
+                    raise RuntimeError(
+                        f"Sample index out of range for DA3 all-frames output: {sample_seq_idx}"
+                    )
+                depth = depth_batch[sample_seq_idx]
+                finalize_record(
+                    item["rec"],
+                    frame_idx=item["frame_idx"],
+                    depth=depth,
+                    union_mask_bool=item["union_mask_bool"],
+                    center_xy=item["center_xy"],
+                    prompt_masks=item["prompt_masks"],
+                    object_entries=item["object_entries"],
+                    frame_start=item["frame_start"],
+                    da3_ms=per_frame_da3_ms,
+                )
+        except Exception as exc:
+            if pending_da3:
+                for item in pending_da3:
+                    rec = item["rec"]
+                    rec["status"] = "da3_error"
+                    rec["error"] = f"{type(exc).__name__}: {exc}"
+                    rec["timing_ms"]["total_ms"] = (time.perf_counter() - item["frame_start"]) * 1000.0
+                    frame_rows.append(rec)
+                    counts["error_frames"] += 1
+            else:
+                video_json["warnings"].append(
+                    f"DA3 all-frames inference failed with no pending detections: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        finally:
+            pending_da3 = []
+
     meta_cap = cv2.VideoCapture(str(video_path))
     try:
         if not meta_cap.isOpened():
@@ -1237,6 +1295,8 @@ def process_video(
 
         if args.da3_mode == "stream":
             flush_da3_stream_inference()
+        elif args.da3_mode == "all_frames":
+            flush_da3_all_frames_inference()
         else:
             flush_pending_da3()
         write_npz_atomic(npz_path, npz_arrays)
@@ -1292,7 +1352,7 @@ def main() -> None:
         raise FileNotFoundError(f"DA3-Streaming config not found: {da3_stream_config}")
 
     da3: DepthAnything3 | None = None
-    if args.da3_mode == "batch":
+    if args.da3_mode in ("batch", "all_frames"):
         da3 = DepthAnything3.from_pretrained(args.da3_model_id).to(device)
     sam3_overrides = dict(
         conf=args.conf,
