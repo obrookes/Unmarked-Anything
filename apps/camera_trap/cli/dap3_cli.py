@@ -26,6 +26,13 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from depth_anything_3.api import DepthAnything3
+from depth_anything_3.utils.camera_trap_masks import (
+    MASK_ENCODING_COCO_RLE,
+    MASK_ENCODING_RAW,
+    MASK_STORAGE_FORMAT_CHOICES,
+    encode_mask_to_rle_npz_payload,
+    normalize_binary_mask,
+)
 from ultralytics.models.sam import SAM3SemanticPredictor
 try:
     from ultralytics.models.sam import SAM3VideoSemanticPredictor
@@ -152,6 +159,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "'fail_fast' marks the video failed."
         ),
     )
+    parser.add_argument(
+        "--mask-storage-format",
+        choices=MASK_STORAGE_FORMAT_CHOICES,
+        default="both",
+        help=(
+            "Mask persistence format in *_arrays.npz: "
+            "'raw' writes dense uint8 masks, "
+            "'rle' writes COCO RLE payloads, "
+            "'both' writes both and keeps the dense key as the canonical reader key."
+        ),
+    )
 
     args = parser.parse_args(argv)
     if args.target_fps <= 0:
@@ -167,6 +185,45 @@ def resolve_device(device_arg: str) -> torch.device:
     if device_arg == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device_arg)
+
+
+def build_mask_storage_entry(
+    *,
+    npz_arrays: dict[str, np.ndarray],
+    key_prefix: str,
+    mask: np.ndarray,
+    base_entry: dict[str, Any],
+    storage_format: str,
+) -> dict[str, Any]:
+    mask_u8 = normalize_binary_mask(mask)
+    entry = dict(base_entry)
+    entry["size"] = [int(mask_u8.shape[0]), int(mask_u8.shape[1])]
+
+    raw_key = f"{key_prefix}_raw"
+    rle_key = f"{key_prefix}_rle"
+
+    if storage_format in {"raw", "both"}:
+        npz_arrays[raw_key] = mask_u8
+        entry["raw_key"] = raw_key
+    if storage_format in {"rle", "both"}:
+        rle_payload, size = encode_mask_to_rle_npz_payload(mask_u8)
+        npz_arrays[rle_key] = rle_payload
+        entry["rle_key"] = rle_key
+        entry["size"] = size
+
+    if storage_format == "raw":
+        entry["encoding"] = MASK_ENCODING_RAW
+        entry["key"] = raw_key
+    elif storage_format == "rle":
+        entry["encoding"] = MASK_ENCODING_COCO_RLE
+        entry["key"] = rle_key
+    elif storage_format == "both":
+        entry["encoding"] = MASK_ENCODING_RAW
+        entry["key"] = raw_key
+    else:
+        raise ValueError(f"Unsupported mask storage format: {storage_format!r}")
+
+    return entry
 
 
 def parse_video_exts(raw_exts: str) -> tuple[str, ...]:
@@ -831,36 +888,41 @@ def process_video(
         for prompt_idx, (prompt, prompt_slug, mask) in enumerate(
             zip(args.sam3_text_prompts, prompt_slugs, prompt_masks)
         ):
-            mask_key = f"{frame_prefix}_mask_{prompt_slug}"
-            npz_arrays[mask_key] = np.asarray(mask, dtype=np.uint8)
             mask_key_rows.append(
-                {
-                    "prompt_index": int(prompt_idx),
-                    "prompt": prompt,
-                    "slug": prompt_slug,
-                    "key": mask_key,
-                }
+                build_mask_storage_entry(
+                    npz_arrays=npz_arrays,
+                    key_prefix=f"{frame_prefix}_mask_{prompt_slug}",
+                    mask=mask,
+                    base_entry={
+                        "prompt_index": int(prompt_idx),
+                        "prompt": prompt,
+                        "slug": prompt_slug,
+                    },
+                    storage_format=args.mask_storage_format,
+                )
             )
         object_key_rows = []
         for obj in object_entries:
             obj_idx = int(obj.get("object_index", len(object_key_rows)))
-            object_mask = np.asarray(obj.get("mask"), dtype=np.uint8)
-            object_mask_key = f"{frame_prefix}_obj_{obj_idx}_mask"
-            npz_arrays[object_mask_key] = object_mask
             object_key_rows.append(
-                {
-                    "object_index": obj_idx,
-                    "track_id": obj.get("track_id"),
-                    "label": obj.get("label"),
-                    "confidence": obj.get("confidence"),
-                    "prompt_index": obj.get("prompt_index"),
-                    "prompt": obj.get("prompt"),
-                    "slug": obj.get("slug"),
-                    "bbox_xyxy": obj.get("bbox_xyxy"),
-                    "center_xy": obj.get("center_xy"),
-                    "mask_nonzero_pixels": int(obj.get("mask_nonzero_pixels") or 0),
-                    "key": object_mask_key,
-                }
+                build_mask_storage_entry(
+                    npz_arrays=npz_arrays,
+                    key_prefix=f"{frame_prefix}_obj_{obj_idx}_mask",
+                    mask=np.asarray(obj.get("mask"), dtype=np.uint8),
+                    base_entry={
+                        "object_index": obj_idx,
+                        "track_id": obj.get("track_id"),
+                        "label": obj.get("label"),
+                        "confidence": obj.get("confidence"),
+                        "prompt_index": obj.get("prompt_index"),
+                        "prompt": obj.get("prompt"),
+                        "slug": obj.get("slug"),
+                        "bbox_xyxy": obj.get("bbox_xyxy"),
+                        "center_xy": obj.get("center_xy"),
+                        "mask_nonzero_pixels": int(obj.get("mask_nonzero_pixels") or 0),
+                    },
+                    storage_format=args.mask_storage_format,
+                )
             )
         rec["objects"] = object_key_rows
         rec["npz_keys"] = {

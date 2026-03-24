@@ -11,11 +11,19 @@ import argparse
 import json
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SRC_PATH = REPO_ROOT / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+
+from depth_anything_3.utils.camera_trap_masks import load_mask_bool
 
 OLD_FRAME_RE = re.compile(r"^frame_(\d+)\.npz$")
 
@@ -208,11 +216,11 @@ def build_union_mask(frame_row: dict[str, Any], arrays: dict[str, np.ndarray]) -
         key = entry.get("key")
         if not key:
             continue
-        mask_arr = arrays.get(str(key))
-        if mask_arr is None:
+        try:
+            mask_bool = load_mask_bool(npz_data=arrays, entry=entry)
+        except KeyError:
             missing_keys += 1
             continue
-        mask_bool = np.asarray(mask_arr).astype(bool)
         if union_mask is None:
             union_mask = mask_bool.copy()
         else:

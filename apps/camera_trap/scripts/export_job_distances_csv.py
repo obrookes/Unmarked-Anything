@@ -18,6 +18,8 @@ SRC_PATH = REPO_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+from depth_anything_3.utils.camera_trap_masks import load_mask_bool
+
 
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv")
 CSV_COLUMNS = [
@@ -186,8 +188,8 @@ def resolve_video_path(
     return None
 
 
-def collect_track_samples(frames: list[dict[str, Any]]) -> dict[Any, dict[int, str]]:
-    track_samples: dict[Any, dict[int, str]] = {}
+def collect_track_samples(frames: list[dict[str, Any]]) -> dict[Any, dict[int, dict[str, Any]]]:
+    track_samples: dict[Any, dict[int, dict[str, Any]]] = {}
     for frame in frames:
         frame_idx = frame.get("frame_index")
         if not isinstance(frame_idx, int):
@@ -198,8 +200,8 @@ def collect_track_samples(frames: list[dict[str, Any]]) -> dict[Any, dict[int, s
             if track_id is None or not isinstance(key, str) or not key:
                 continue
             track_samples.setdefault(track_id, {})
-            # Keep the first key observed for a track at a given frame.
-            track_samples[track_id].setdefault(frame_idx, key)
+            # Keep the first object entry observed for a track at a given frame.
+            track_samples[track_id].setdefault(frame_idx, dict(obj))
     return track_samples
 
 
@@ -246,8 +248,8 @@ def build_rows_for_video(
         minute = creation_dt.minute
 
     with np.load(npz_path) as arrays:
-        for track_id, frame_to_key in sorted(track_samples.items(), key=lambda item: str(item[0])):
-            frame_indices = sorted(frame_to_key.keys())
+        for track_id, frame_to_entry in sorted(track_samples.items(), key=lambda item: str(item[0])):
+            frame_indices = sorted(frame_to_entry.keys())
             if not frame_indices:
                 continue
             first_idx = frame_indices[0]
@@ -262,10 +264,14 @@ def build_rows_for_video(
                     if frame_idx not in present_indices:
                         continue
                     depth_key = f"f{frame_idx}_depth"
-                    mask_key = frame_to_key[frame_idx]
-                    if depth_key not in arrays or mask_key not in arrays:
+                    mask_entry = frame_to_entry[frame_idx]
+                    if depth_key not in arrays:
                         continue
-                    distance = compute_distance(arrays[depth_key], arrays[mask_key])
+                    try:
+                        mask = load_mask_bool(npz_data=arrays, entry=mask_entry)
+                    except KeyError:
+                        continue
+                    distance = compute_distance(arrays[depth_key], mask)
                     if distance is not None:
                         window_distances.append(distance)
 
