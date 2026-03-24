@@ -178,11 +178,25 @@ def get_depth_array(
     npz_data: np.lib.npyio.NpzFile,
     frame_row: dict[str, Any],
     frame_shape_hw: tuple[int, int] | None = None,
+    depth_source: str = "new",
 ) -> np.ndarray:
     depth_key = ((frame_row.get("npz_keys") or {}).get("depth"))
-    if not depth_key or depth_key not in npz_data:
-        raise KeyError(f"Frame {frame_row.get('frame_index')}: missing depth key {depth_key}")
-    depth = np.asarray(npz_data[depth_key], dtype=np.float32)
+    if not depth_key:
+        raise KeyError(f"Frame {frame_row.get('frame_index')}: missing depth key reference in npz_keys")
+
+    if depth_source == "new":
+        resolved_depth_key = depth_key
+    elif depth_source == "old":
+        resolved_depth_key = f"{depth_key}_old"
+    else:
+        raise ValueError(f"Unsupported depth_source: {depth_source!r}. Expected 'new' or 'old'.")
+
+    if resolved_depth_key not in npz_data:
+        raise KeyError(
+            f"Frame {frame_row.get('frame_index')}: missing depth key {resolved_depth_key} "
+            f"(source={depth_source}, base={depth_key})"
+        )
+    depth = np.asarray(npz_data[resolved_depth_key], dtype=np.float32)
     if frame_shape_hw is not None and depth.shape != frame_shape_hw:
         depth = cv2.resize(depth, (frame_shape_hw[1], frame_shape_hw[0]), interpolation=cv2.INTER_CUBIC)
     return depth
@@ -253,6 +267,7 @@ def draw_overlay_frame(
     draw_mask: bool = True,
     draw_hud: bool = False,
     compute_depth_stats: bool = False,
+    depth_source: str = "new",
 ) -> tuple[np.ndarray, list[dict[str, Any]], list[str], list[str]]:
     warnings: list[str] = []
     frame_idx = int(rec.get("frame_index", -1))
@@ -336,7 +351,12 @@ def draw_overlay_frame(
     hud_lines: list[str] = []
     if compute_depth_stats or draw_hud:
         try:
-            depth = get_depth_array(npz_data=npz_obj, frame_row=rec, frame_shape_hw=frame_rgb.shape[:2])
+            depth = get_depth_array(
+                npz_data=npz_obj,
+                frame_row=rec,
+                frame_shape_hw=frame_rgb.shape[:2],
+                depth_source=depth_source,
+            )
             depth_stats = _compute_depth_stats_for_objects(valid_objects=valid_objects, depth=depth)
         except Exception as e:
             warnings.append(f"Frame {frame_idx}: depth stats unavailable ({e})")
@@ -516,6 +536,7 @@ def write_overlay_video(
     draw_hud: bool = True,
     output_fps: float | None = None,
     fourcc: str = "mp4v",
+    depth_source: str = "new",
 ) -> dict[str, Any]:
     if len(fourcc) != 4:
         raise ValueError("fourcc must be a 4-character code, e.g. 'mp4v'")
@@ -574,6 +595,7 @@ def write_overlay_video(
                 draw_mask=draw_mask,
                 draw_hud=draw_hud,
                 compute_depth_stats=draw_hud,
+                depth_source=depth_source,
             )
             warnings.extend(frame_warnings)
             writer.write(cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR))
@@ -639,6 +661,7 @@ def compute_depth_comparison_results(
     analysis_records: list[dict[str, Any]],
     cap: cv2.VideoCapture,
     npz_data: np.lib.npyio.NpzFile,
+    depth_source: str = "new",
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     cmap = plt.get_cmap("tab20")
@@ -655,13 +678,12 @@ def compute_depth_comparison_results(
                 f"Frame {frame_idx}: mask/frame shape mismatch {union_mask.shape} vs {frame_rgb.shape[:2]}"
             )
 
-        depth_key = ((rec.get("npz_keys") or {}).get("depth"))
-        if not depth_key or depth_key not in npz_data:
-            raise KeyError(f"Frame {frame_idx}: missing depth key {depth_key}")
-
-        depth = np.asarray(npz_data[depth_key], dtype=np.float32)
-        if depth.shape != frame_rgb.shape[:2]:
-            depth = cv2.resize(depth, (frame_rgb.shape[1], frame_rgb.shape[0]), interpolation=cv2.INTER_CUBIC)
+        depth = get_depth_array(
+            npz_data=npz_data,
+            frame_row=rec,
+            frame_shape_hw=frame_rgb.shape[:2],
+            depth_source=depth_source,
+        )
 
         object_results: list[dict[str, Any]] = []
         for obj in object_rows:

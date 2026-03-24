@@ -22,6 +22,7 @@ def test_parse_args_track_defaults() -> None:
     )
     assert args.sam3_track_isolation == "recreate"
     assert args.sam3_track_tail_policy == "warn_and_finalize"
+    assert args.da3_mode == "batch"
 
 
 def test_parse_args_track_overrides() -> None:
@@ -45,6 +46,29 @@ def test_parse_args_track_overrides() -> None:
     )
     assert args.sam3_track_isolation == "both"
     assert args.sam3_track_tail_policy == "fail_fast"
+
+
+def test_parse_args_da3_stream_mode() -> None:
+    args = dap3_cli.parse_args(
+        [
+            "--input-video-dir",
+            "in",
+            "--output-dir",
+            "out",
+            "--sam3-model-path",
+            "weights/sam3/model.pt",
+            "--sam3-text-prompts",
+            "ape",
+            "--da3-batch-size",
+            "4",
+            "--da3-mode",
+            "stream",
+            "--da3-stream-config",
+            "da3_streaming/configs/base_config.yaml",
+        ]
+    )
+    assert args.da3_mode == "stream"
+    assert args.da3_stream_config == "da3_streaming/configs/base_config.yaml"
 
 
 class _FakeTracker:

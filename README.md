@@ -72,25 +72,52 @@ python apps/camera_trap/cli/dap3_cli.py \
   --output-dir outputs/demo \
   --sam3-model-path weights/sam3/safari_checkpoint_hf.pt \
   --sam3-text-prompts animal \
+  --da3-mode batch \
   --da3-batch-size 4
 ```
 
 Legacy wrapper also works: `python dap3_cli.py ...`
+
+Streaming mode example (DA3-Streaming on all sampled frames):
+
+```bash
+python apps/camera_trap/cli/dap3_cli.py \
+  --input-video-dir assets/videos \
+  --output-dir outputs/demo_stream \
+  --sam3-model-path weights/sam3/safari_checkpoint_hf.pt \
+  --sam3-text-prompts animal \
+  --da3-mode stream \
+  --da3-stream-config da3_streaming/configs/base_config.yaml \
+  --da3-batch-size 4
+```
+
+All-frames mode example (standard DA3 on all sampled frames; persist depth only for SAM-positive frames):
+
+```bash
+python apps/camera_trap/cli/dap3_cli.py \
+  --input-video-dir assets/videos \
+  --output-dir outputs/demo_all_frames \
+  --sam3-model-path weights/sam3/safari_checkpoint_hf.pt \
+  --sam3-text-prompts animal \
+  --da3-mode all_frames \
+  --da3-batch-size 4
+```
 
 ## Sample Data
 
 - Input video: `assets/videos/demo.MP4`
 - Suggested output directory: `outputs/demo/`
 - Visualization CLI: `python apps/camera_trap/cli/visualize_test_output.py ...`
-- Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb) (kept for ad-hoc exploration; CLI is the repeatable/default path)
+- Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb)
 - Pass `--video-dir` for stem-based auto-resolution and selection from `run_manifest.json`.
 - Use `--video-path` only for direct single-video mode.
+- Use `--depth-source new|old` to choose which depth maps are rendered (`old` expects merged `*_old` keys in NPZ).
 
-Video preprocessing helper:
+Preprocessing helpers:
 - `hpc/scripts/crop_videos.sh` crops a fixed bottom percentage from all videos in a directory (requires `ffmpeg`).
-- Example: `hpc/scripts/crop_videos.sh --suffix assets/videos -p 9.75`
+- `hpc/scripts/reduce_video_fps.sh` creates reduced-FPS duplicates for all videos in a directory.
 
-Interactive example:
+Basic interactive example:
 
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
@@ -101,37 +128,19 @@ python apps/camera_trap/cli/visualize_test_output.py \
   --page-size 2
 ```
 
-Interactive selection example (multiple videos in one run root):
-
-```bash
-python apps/camera_trap/cli/visualize_test_output.py \
-  --output-root outputs/demo \
-  --video-dir assets/videos \
-  --view processed
-```
-
-List videos and exit:
-
-```bash
-python apps/camera_trap/cli/visualize_test_output.py \
-  --output-root outputs/demo \
-  --video-dir assets/videos \
-  --list-videos
-```
-
-Full-timeline overlay video export (single selected video):
+Overlay export example:
 
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
   --output-root outputs/demo \
   --video-stem demo \
   --video-dir assets/videos \
-  --view processed \
+  --no-gui \
   --write-video outputs/demo/demo_overlay.mp4 \
-  --ov-mask --ov-bbox --ov-center --ov-hud
+  --export-style rgb
 ```
 
-Analysis-style depth overlay export (no histogram panel; outline-only masks; per-object mean mask-depth labels; full-height external scale bar):
+Analysis-depth overlay export:
 
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
@@ -141,17 +150,6 @@ python apps/camera_trap/cli/visualize_test_output.py \
   --no-gui \
   --write-video outputs/demo/demo_analysis_overlay.mp4 \
   --export-style analysis-depth
-```
-
-Headless export-only example (no GUI windows):
-
-```bash
-python apps/camera_trap/cli/visualize_test_output.py \
-  --output-root outputs/demo \
-  --video-stem demo \
-  --video-dir assets/videos \
-  --no-gui \
-  --write-video outputs/demo/demo_overlay.mp4
 ```
 
 Batch export-all example:
@@ -170,6 +168,8 @@ Batch naming:
 - `--export-style rgb` writes `<stem>_overlay.mp4`
 - `--export-style analysis-depth` writes `<stem>_analysis_overlay.mp4`
 
+Depth-analysis helpers are documented separately in [`apps/camera_trap/scripts/README.md`](./apps/camera_trap/scripts/README.md).
+
 ## HPC Execution
 
 - For SLURM/HPC job structure, batch scripts, manifests, and helper utilities, see: [`hpc/README.md`](./hpc/README.md)
@@ -183,6 +183,7 @@ python apps/camera_trap/cli/dap3_cli.py \
   --sam3-model-path weights/sam3/safari_checkpoint_hf.pt \
   --sam3-text-prompts animal deer boar \
   --da3-model-id depth-anything/DA3NESTED-GIANT-LARGE \
+  --da3-mode batch \
   --da3-batch-size 4 \
   --target-fps 1.0 \
   --sam3-mode track \
@@ -200,7 +201,9 @@ python apps/camera_trap/cli/dap3_cli.py \
 | `--sam3-model-path` | path | yes | - | Path to SAM3 checkpoint (`.pt`). |
 | `--sam3-text-prompts` | list of strings | yes | - | One or more global SAM3 text prompts. |
 | `--da3-model-id` | string | no | `depth-anything/DA3NESTED-GIANT-LARGE` | DA3 pretrained model ID. |
-| `--da3-batch-size` | int | yes | - | DA3 batch size for SAM-positive sampled frames. Must be `> 0`. |
+| `--da3-mode` | enum | no | `batch` | DA3 execution mode: `batch` (batched DA3 on SAM-positive frames), `stream` (DA3-Streaming on all sampled frames), or `all_frames` (standard DA3 on all sampled frames). |
+| `--da3-stream-config` | path | no | `da3_streaming/configs/base_config.yaml` | DA3-Streaming YAML config path (used when `--da3-mode stream`). |
+| `--da3-batch-size` | int | yes | - | Positive integer required by CLI. In `batch` mode it is the DA3 batch size; in `stream` and `all_frames` modes it is retained for compatibility/progress accounting. |
 | `--target-fps` | float | no | `1.0` | Sampling rate for processing. Must be `> 0`. |
 | `--sam3-mode` | enum | no | `track` | `track` (video tracking) or `frame` (per-frame segmentation). |
 | `--conf` | float | no | `0.25` | SAM3 confidence threshold. |
@@ -224,6 +227,8 @@ Per-frame status values include: `processed`, `empty_mask`, `sam_error`, `da3_er
 
 - `target_fps` is implemented as frame stride (`round(video_fps / target_fps)`, minimum 1).
 - Non-overwrite mode skips videos that already have both expected output files.
+- `--da3-mode stream` runs DA3-Streaming in memory on all sampled frames; SAM outputs still control which frames are persisted as `processed` in JSON/NPZ.
+- `--da3-mode all_frames` runs standard DA3 in memory on all sampled frames; persisted depth storage remains aligned to `processed` (SAM-positive) frame rows.
 - If `--sam3-mode track` is unavailable in your ultralytics build, use `--sam3-mode frame`.
 - Default `--sam3-track-isolation recreate` prevents cross-video tracker state leakage in multi-video runs.
 - Use `hpc/scripts/summarize_track_run.py --run-dir <run>` for a quick forensic summary of per-video frame counts and track IDs.

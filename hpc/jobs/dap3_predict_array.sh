@@ -44,35 +44,39 @@ fi
 LINE="${JOB_LINES[$TASK_INDEX]}"
 IFS=$'\t' read -r -a F <<< "$LINE"
 
-# New manifest format columns:
+# Manifest format columns:
 # 1 input_video_dir
 # 2 sam3_model_path
 # 3 sam3_text_prompts_csv
 # 4 da3_model_id
-# 5 target_fps
-# 6 sam3_mode
-# 7 device
-# 8 conf
-# 9 use_half
-# 10 overwrite
-# 11 max_videos
-# 12 da3_batch_size
-# 13 sam3_track_isolation (optional: recreate|reset|both)
-# 14 sam3_track_tail_policy (optional: warn_and_finalize|fail_fast)
+# 5 da3_mode (optional: batch|stream|all_frames, default batch)
+# 6 da3_stream_config (optional path, used in stream mode)
+# 7 target_fps
+# 8 sam3_mode
+# 9 device
+# 10 conf
+# 11 use_half
+# 12 overwrite
+# 13 max_videos
+# 14 da3_batch_size
+# 15 sam3_track_isolation (optional: recreate|reset|both)
+# 16 sam3_track_tail_policy (optional: warn_and_finalize|fail_fast)
 INPUT_VIDEO_DIR="${F[0]:-}"
 SAM3_MODEL_PATH="${F[1]:-}"
 SAM3_TEXT_PROMPTS="${F[2]:-}"
 DA3_MODEL_ID="${F[3]:-depth-anything/DA3NESTED-GIANT-LARGE}"
-TARGET_FPS="${F[4]:-1.0}"
-SAM3_MODE="${F[5]:-track}"
-DEVICE="${F[6]:-auto}"
-CONF="${F[7]:-0.25}"
-USE_HALF="${F[8]:-0}"
-OVERWRITE="${F[9]:-0}"
-MAX_VIDEOS="${F[10]:-}"
-DA3_BATCH_SIZE="${F[11]:-}"
-SAM3_TRACK_ISOLATION="${F[12]:-recreate}"
-SAM3_TRACK_TAIL_POLICY="${F[13]:-warn_and_finalize}"
+DA3_MODE="${F[4]:-batch}"
+DA3_STREAM_CONFIG="${F[5]:-da3_streaming/configs/base_config.yaml}"
+TARGET_FPS="${F[6]:-1.0}"
+SAM3_MODE="${F[7]:-track}"
+DEVICE="${F[8]:-auto}"
+CONF="${F[9]:-0.25}"
+USE_HALF="${F[10]:-0}"
+OVERWRITE="${F[11]:-0}"
+MAX_VIDEOS="${F[12]:-}"
+DA3_BATCH_SIZE="${F[13]:-}"
+SAM3_TRACK_ISOLATION="${F[14]:-recreate}"
+SAM3_TRACK_TAIL_POLICY="${F[15]:-warn_and_finalize}"
 
 if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" || -z "$SAM3_TEXT_PROMPTS" || -z "$DA3_BATCH_SIZE" ]]; then
   echo "Invalid manifest line (missing required fields): $LINE" >&2
@@ -83,6 +87,14 @@ if ! [[ "$DA3_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   echo "da3_batch_size must be a positive integer." >&2
   exit 1
 fi
+case "$DA3_MODE" in
+  batch|stream|all_frames) ;;
+  *)
+    echo "Invalid da3_mode '$DA3_MODE' in manifest line: $LINE" >&2
+    echo "da3_mode must be one of: batch, stream, all_frames." >&2
+    exit 1
+    ;;
+esac
 case "$SAM3_TRACK_ISOLATION" in
   recreate|reset|both) ;;
   *)
@@ -106,6 +118,13 @@ fi
 if [[ "$SAM3_MODEL_PATH" != /* ]]; then
   SAM3_MODEL_PATH="$REPO_ROOT/$SAM3_MODEL_PATH"
 fi
+if [[ "$DA3_STREAM_CONFIG" != /* ]]; then
+  DA3_STREAM_CONFIG="$REPO_ROOT/$DA3_STREAM_CONFIG"
+fi
+if [[ "$DA3_MODE" == "stream" && ! -f "$DA3_STREAM_CONFIG" ]]; then
+  echo "DA3 stream config not found: $DA3_STREAM_CONFIG" >&2
+  exit 1
+fi
 
 slugify() {
   local s="$1"
@@ -126,12 +145,14 @@ DA3_TAG="$(slugify "$DA3_NAME")"
 PROMPT_TAG="$(slugify "$SAM3_TEXT_PROMPTS")"
 FPS_TAG="$(slugify "${TARGET_FPS//./p}")"
 MODE_TAG="$(slugify "$SAM3_MODE")"
+DA3_EXEC_TAG="$(slugify "$DA3_MODE")"
 [[ -z "$MODEL_TAG" ]] && MODEL_TAG="sam3"
 [[ -z "$DA3_TAG" ]] && DA3_TAG="da3"
 [[ -z "$PROMPT_TAG" ]] && PROMPT_TAG="noprompt"
 [[ -z "$FPS_TAG" ]] && FPS_TAG="1p0"
 [[ -z "$MODE_TAG" ]] && MODE_TAG="track"
-JOB_TAG="${MODEL_TAG}-${DA3_TAG}-${PROMPT_TAG}-fps${FPS_TAG}-${MODE_TAG}"
+[[ -z "$DA3_EXEC_TAG" ]] && DA3_EXEC_TAG="batch"
+JOB_TAG="${MODEL_TAG}-${DA3_TAG}-${DA3_EXEC_TAG}-${PROMPT_TAG}-fps${FPS_TAG}-${MODE_TAG}"
 JOB_TAG="${JOB_TAG:0:80}"
 
 cd "$REPO_ROOT"
@@ -140,7 +161,7 @@ module purge
 module load cuda/12.6
 
 source "$HOME/miniforge3/bin/activate"
-conda activate dap-3_py3-11
+conda activate dap3-stream
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
@@ -162,11 +183,15 @@ CMD=(
   --sam3-model-path "$SAM3_MODEL_PATH"
   --sam3-text-prompts "${PROMPTS[@]}"
   --da3-model-id "$DA3_MODEL_ID"
+  --da3-mode "$DA3_MODE"
   --target-fps "$TARGET_FPS"
   --sam3-mode "$SAM3_MODE"
   --conf "$CONF"
   --device "$DEVICE"
 )
+if [[ "$DA3_MODE" == "stream" ]]; then
+  CMD+=(--da3-stream-config "$DA3_STREAM_CONFIG")
+fi
 
 if [[ "$USE_HALF" == "1" ]]; then
   CMD+=(--half)

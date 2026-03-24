@@ -7,6 +7,7 @@ This directory contains cluster-oriented job scripts and helpers for running `da
 - `jobs/`: SLURM batch scripts.
   - `dap3_predict_ape.sh`: single-job template with sensible defaults.
   - `dap3_predict_array.sh`: array-job script driven by a TSV manifest.
+  - `dap3_export_overlays_array.sh`: dependent export job for headless overlay video generation.
 - `configs/`: job configuration inputs.
   - `job_manifest.tsv`: one array task per non-comment row.
 - `scripts/`: helper utilities for submit/monitor/result collection.
@@ -39,7 +40,8 @@ sbatch --export=ALL,\
 REPO_ROOT=$HOME/Unmarked-Anything,\
 INPUT_VIDEO_DIR=$HOME/data/camera_trap/videos,\
 SAM3_MODEL_PATH=$HOME/models/safari_checkpoint_hf.pt,\
-SAM3_TEXT_PROMPTS=ape,baboon,\
+SAM3_TEXT_PROMPTS=ape,baboon,DA3_MODEL_ID=depth-anything/DA3NESTED-GIANT-LARGE,\
+DA3_MODE=stream,DA3_STREAM_CONFIG=$HOME/Unmarked-Anything/da3_streaming/configs/base_config.yaml,\
 TARGET_FPS=1.0,SAM3_MODE=track,DEVICE=auto,USE_HALF=1,OVERWRITE=0,MAX_VIDEOS=,DA3_BATCH_SIZE=4,\
 SAM3_TRACK_ISOLATION=recreate,SAM3_TRACK_TAIL_POLICY=warn_and_finalize,\
 OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
@@ -56,16 +58,18 @@ OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
 2. `sam3_model_path`
 3. `sam3_text_prompts_csv`
 4. `da3_model_id`
-5. `target_fps`
-6. `sam3_mode`
-7. `device`
-8. `conf`
-9. `use_half` (`0`/`1`)
-10. `overwrite` (`0`/`1`)
-11. `max_videos` (optional)
-12. `da3_batch_size` (required, positive integer)
-13. `sam3_track_isolation` (optional: `recreate`, `reset`, `both`; default `recreate`)
-14. `sam3_track_tail_policy` (optional: `warn_and_finalize`, `fail_fast`; default `warn_and_finalize`)
+5. `da3_mode` (optional: `batch`, `stream`, `all_frames`; default `batch`)
+6. `da3_stream_config` (optional path; used in stream mode)
+7. `target_fps`
+8. `sam3_mode`
+9. `device`
+10. `conf`
+11. `use_half` (`0`/`1`)
+12. `overwrite` (`0`/`1`)
+13. `max_videos` (optional)
+14. `da3_batch_size` (required, positive integer)
+15. `sam3_track_isolation` (optional: `recreate`, `reset`, `both`; default `recreate`)
+16. `sam3_track_tail_policy` (optional: `warn_and_finalize`, `fail_fast`; default `warn_and_finalize`)
 
 Notes:
 - Comment lines start with `#`.
@@ -75,6 +79,8 @@ Notes:
 - `job_tag` is generated automatically from SAM3 model, DA3 model, prompts, fps, and mode.
 - For model-based tags, only model identifiers/basenames are used (not full filesystem paths).
 - `da3_batch_size` is passed through directly to the CLI and must be a positive integer.
+- `da3_mode=stream` runs in-memory DA3-Streaming on all sampled frames and requires a valid `da3_stream_config`.
+- `da3_mode=all_frames` runs standard DA3 on all sampled frames in memory; output persistence remains SAM-positive (`processed`) frames.
 - `sam3_track_isolation` and `sam3_track_tail_policy` are only relevant when `sam3_mode=track`.
 
 ### 2) Submit array
@@ -90,6 +96,29 @@ hpc/scripts/submit_array.sh hpc/jobs/dap3_predict_array.sh hpc/configs/job_manif
 ```
 
 The helper auto-counts runnable manifest rows and submits `--array=1-N`.
+
+### 3) Submit array + automatic headless overlay export
+
+This workflow submits the prediction array, then submits a dependent export job that runs
+`visualize_test_output.py` in `--no-gui --export-all` mode for all run directories matching
+`*-${predict_array_job_id}` under `OUTPUT_ROOT`.
+
+```bash
+hpc/scripts/submit_array_with_export.sh
+```
+
+Optional overrides:
+
+```bash
+OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs \
+EXPORT_STYLE=analysis-depth \
+DEPTH_SOURCE=new \
+EXPORT_SUBDIR=overlay_videos \
+EXPORT_DEPENDENCY=afterok \
+hpc/scripts/submit_array_with_export.sh hpc/jobs/dap3_predict_array.sh hpc/configs/job_manifest.tsv
+```
+
+Current status: these new automation scripts are not yet tested on Isambard and need to be ported/validated there.
 
 ## Helper Scripts
 
@@ -108,6 +137,23 @@ Submits `dap3_predict_array.sh` with size inferred from manifest.
 ```bash
 hpc/scripts/submit_array.sh
 ```
+
+### `hpc/scripts/submit_array_with_export.sh`
+
+Submits `dap3_predict_array.sh`, captures the array job id, then submits
+`hpc/jobs/dap3_export_overlays_array.sh` with an SLURM dependency (`afterok` by default).
+
+```bash
+hpc/scripts/submit_array_with_export.sh
+```
+
+Key environment overrides:
+- `EXPORT_DEPENDENCY` (`afterok` or `afterany`)
+- `EXPORT_STYLE` (`rgb` or `analysis-depth`)
+- `DEPTH_SOURCE` (`new` or `old`)
+- `EXPORT_SUBDIR` (default `overlay_videos`)
+- `VIDEO_DIR_OVERRIDE` (force source video directory)
+- `EXPORT_FPS` and `EXPORT_FOURCC`
 
 ### `hpc/scripts/monitor_jobs.sh`
 
@@ -159,6 +205,16 @@ hpc/scripts/crop_videos.sh --suffix assets/videos -p 9.75
 hpc/scripts/crop_videos.sh --overwrite assets/videos -p 9.75
 ```
 
+### `hpc/scripts/reduce_video_fps.sh`
+
+Creates reduced-FPS duplicates for all videos in a directory using `ffmpeg`.
+Useful when you want smaller/slower video copies while preserving the originals.
+
+```bash
+hpc/scripts/reduce_video_fps.sh assets/videos --fps 5
+# example output: demo.MP4 -> demo-5fps.MP4
+```
+
 ### `hpc/scripts/summarize_track_run.py`
 
 Summarizes per-video JSON outputs to highlight tracking anomalies (sampled frame counts, first track IDs, warnings).
@@ -167,10 +223,15 @@ Summarizes per-video JSON outputs to highlight tracking anomalies (sampled frame
 python hpc/scripts/summarize_track_run.py --run-dir hpc/runs/<run_tag>
 ```
 
+### Depth analysis helpers
+
+Depth-analysis and comparison utilities are documented separately in
+[`apps/camera_trap/scripts/README.md`](../apps/camera_trap/scripts/README.md).
+
 ## Output conventions
 
 - Single job run dir: `hpc/runs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}`
-- Array run dir: `hpc/runs/${SLURM_JOB_NAME}-${sam3basename}-${da3model}-${prompt}-fps${fps}-${mode}-${SLURM_ARRAY_TASK_ID}-${SLURM_JOB_ID}`
+- Array run dir: `hpc/runs/${SLURM_JOB_NAME}-${sam3basename}-${da3model}-${da3mode}-${prompt}-fps${fps}-${mode}-${SLURM_ARRAY_TASK_ID}-${SLURM_JOB_ID}`
 - Logs:
   - single: `hpc/logs/slurm/%x-%j.out|err`
   - array: `hpc/logs/slurm/%x-%A_%a.out|err`

@@ -79,6 +79,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--page-size", type=int, default=1, help="Processed-view page size.")
     parser.add_argument("--overlay-alpha", type=float, default=0.45, help="Mask blend alpha in [0,1].")
     parser.add_argument("--depth-cmap", type=str, default="inferno", help="Matplotlib colormap for depth display.")
+    parser.add_argument(
+        "--depth-source",
+        choices=["new", "old"],
+        default="new",
+        help=(
+            "Depth map source: 'new' uses default <depth_key>, 'old' uses merged "
+            "<depth_key>_old arrays if present."
+        ),
+    )
     parser.add_argument("--show-bbox", dest="show_bbox", action="store_true", help="Show bounding boxes.")
     parser.add_argument("--no-show-bbox", dest="show_bbox", action="store_false", help="Hide bounding boxes.")
     parser.add_argument("--show-center", dest="show_center", action="store_true", help="Show centers.")
@@ -325,6 +334,7 @@ def build_processed_page_canvas(
     page_size: int,
     overlay_alpha: float,
     depth_cmap: str,
+    depth_source: str,
     show_bbox: bool,
     show_center: bool,
 ) -> tuple[np.ndarray, list[str]]:
@@ -355,11 +365,17 @@ def build_processed_page_canvas(
             draw_mask=True,
             draw_hud=False,
             compute_depth_stats=False,
+            depth_source=depth_source,
         )
         warnings.extend(overlay_warnings)
 
         try:
-            depth = get_depth_array(npz_data=npz_data, frame_row=rec, frame_shape_hw=frame_rgb.shape[:2])
+            depth = get_depth_array(
+                npz_data=npz_data,
+                frame_row=rec,
+                frame_shape_hw=frame_rgb.shape[:2],
+                depth_source=depth_source,
+            )
             depth_rgb = _colorize_depth(depth, depth_cmap)
         except Exception as e:
             warnings.append(f"Frame {frame_idx}: depth unavailable ({e})")
@@ -404,6 +420,7 @@ class ProcessedBrowser:
         page_size: int,
         overlay_alpha: float,
         depth_cmap: str,
+        depth_source: str,
         show_bbox: bool,
         show_center: bool,
     ) -> None:
@@ -413,6 +430,7 @@ class ProcessedBrowser:
         self.page_size = page_size
         self.overlay_alpha = overlay_alpha
         self.depth_cmap = depth_cmap
+        self.depth_source = depth_source
         self.show_bbox = show_bbox
         self.show_center = show_center
         self.max_page = max(0, math.ceil(len(records) / page_size) - 1)
@@ -472,6 +490,7 @@ class ProcessedBrowser:
             page_size=self.page_size,
             overlay_alpha=self.overlay_alpha,
             depth_cmap=self.depth_cmap,
+            depth_source=self.depth_source,
             show_bbox=self.show_bbox,
             show_center=self.show_center,
         )
@@ -498,11 +517,13 @@ class AnalysisBrowser:
         cap: cv2.VideoCapture,
         npz_data: np.lib.npyio.NpzFile,
         depth_cmap: str,
+        depth_source: str,
     ) -> None:
         self.records = records
         self.cap = cap
         self.npz_data = npz_data
         self.depth_cmap = depth_cmap
+        self.depth_source = depth_source
         self.max_idx = max(0, len(records) - 1)
         self.idx = 0
 
@@ -569,6 +590,7 @@ class AnalysisBrowser:
             analysis_records=[rec],
             cap=self.cap,
             npz_data=self.npz_data,
+            depth_source=self.depth_source,
         )[0]
         objects = result.get("objects") or []
 
@@ -672,6 +694,7 @@ def _write_analysis_depth_video(
     draw_hud: bool = True,
     output_fps: float | None = None,
     fourcc: str = "mp4v",
+    depth_source: str = "new",
 ) -> dict[str, Any]:
     if len(fourcc) != 4:
         raise ValueError("fourcc must be a 4-character code, e.g. 'mp4v'")
@@ -727,7 +750,12 @@ def _write_analysis_depth_video(
                 continue
 
             try:
-                depth = get_depth_array(npz_data=npz_obj, frame_row=rec, frame_shape_hw=frame_rgb.shape[:2])
+                depth = get_depth_array(
+                    npz_data=npz_obj,
+                    frame_row=rec,
+                    frame_shape_hw=frame_rgb.shape[:2],
+                    depth_source=depth_source,
+                )
                 depth_rgb, lo, hi = _colorize_depth_with_range(depth=depth, cmap_name=depth_cmap)
             except Exception as e:
                 warnings.append(f"Frame {frame_idx}: depth unavailable ({e})")
@@ -744,6 +772,7 @@ def _write_analysis_depth_video(
                 draw_mask=False,
                 draw_hud=draw_hud,
                 compute_depth_stats=draw_hud,
+                depth_source=depth_source,
             )
             warnings.extend(frame_warnings)
             warnings.extend(
@@ -807,6 +836,7 @@ def _run_single_video(
                     draw_hud=args.ov_hud,
                     output_fps=args.export_fps,
                     fourcc=args.export_fourcc,
+                    depth_source=args.depth_source,
                 )
             else:
                 export = write_overlay_video(
@@ -821,6 +851,7 @@ def _run_single_video(
                     draw_hud=args.ov_hud,
                     output_fps=args.export_fps,
                     fourcc=args.export_fourcc,
+                    depth_source=args.depth_source,
                 )
             print("Overlay export complete:")
             print(f"  path: {export['output_path']}")
@@ -841,6 +872,7 @@ def _run_single_video(
                         page_size=args.page_size,
                         overlay_alpha=args.overlay_alpha,
                         depth_cmap=args.depth_cmap,
+                        depth_source=args.depth_source,
                         show_bbox=args.show_bbox,
                         show_center=args.show_center,
                     )
@@ -852,6 +884,7 @@ def _run_single_video(
                         cap=cap,
                         npz_data=npz_data,
                         depth_cmap=args.depth_cmap,
+                        depth_source=args.depth_source,
                     )
                 )
             if browsers:
