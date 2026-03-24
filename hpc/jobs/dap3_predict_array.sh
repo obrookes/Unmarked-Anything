@@ -161,7 +161,7 @@ module purge
 module load cuda/12.6
 
 source "$HOME/miniforge3/bin/activate"
-conda activate dap-3_py3-11
+conda activate dap3-stream
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
