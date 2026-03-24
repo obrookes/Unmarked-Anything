@@ -205,6 +205,16 @@ hpc/scripts/crop_videos.sh --suffix assets/videos -p 9.75
 hpc/scripts/crop_videos.sh --overwrite assets/videos -p 9.75
 ```
 
+### `hpc/scripts/reduce_video_fps.sh`
+
+Creates reduced-FPS duplicates for all videos in a directory using `ffmpeg`.
+Useful when you want smaller/slower video copies while preserving the originals.
+
+```bash
+hpc/scripts/reduce_video_fps.sh assets/videos --fps 5
+# example output: demo.MP4 -> demo-5fps.MP4
+```
+
 ### `hpc/scripts/summarize_track_run.py`
 
 Summarizes per-video JSON outputs to highlight tracking anomalies (sampled frame counts, first track IDs, warnings).

@@ -116,6 +116,8 @@ python apps/camera_trap/cli/dap3_cli.py \
 Video preprocessing helper:
 - `hpc/scripts/crop_videos.sh` crops a fixed bottom percentage from all videos in a directory (requires `ffmpeg`).
 - Example: `hpc/scripts/crop_videos.sh --suffix assets/videos -p 9.75`
+- `hpc/scripts/reduce_video_fps.sh` creates reduced-FPS duplicates for all videos in a directory.
+- Example: `hpc/scripts/reduce_video_fps.sh assets/videos --fps 5`
 
 Interactive example:
 
