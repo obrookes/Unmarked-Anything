@@ -3,4 +3,4 @@
 #assets/videos	weights/sam3/sam3-safari-pos.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	batch	da3_streaming/configs/base_config.yaml	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize
 #assets/videos	weights/sam3/sam3-safari-pos.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	all_frames	da3_streaming/configs/base_config.yaml	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize
 #assets/videos	weights/sam3/sam3-safari-neg.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	stream	da3_streaming/configs/base_config.yaml	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize
-#assets/videos	weights/sam3/sam3-safari-neg-parents.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	stream	da3_streaming/configs/base_config.yaml	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize
+assets/videos	weights/sam3/sam3-safari-neg-parents.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	all_frames	da3_streaming/configs/base_config.yaml	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize
