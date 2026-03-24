@@ -223,71 +223,10 @@ Summarizes per-video JSON outputs to highlight tracking anomalies (sampled frame
 python hpc/scripts/summarize_track_run.py --run-dir hpc/runs/<run_tag>
 ```
 
-### Depth analysis helpers (`apps/camera_trap/scripts`)
+### Depth analysis helpers
 
-These scripts are not HPC-specific and are shared under `apps/camera_trap/scripts`.
-
-`merge_old_depth_into_stream_npz.py` merges legacy `da3_streaming` depth maps
-(`results_output/frame_<idx>.npz`) into a stream-mode `*_arrays.npz` using keys
-`<existing_depth_key>_old`, so visualization can toggle depth source.
-It also computes per-frame `depth_mask_mean_old` in the per-video JSON while
-preserving existing `depth_mask_mean`.
-
-```bash
-python apps/camera_trap/scripts/merge_old_depth_into_stream_npz.py \
-  --old-results-dir da3_streaming/exps/extract_images_/2026-03-04-20-15-48/results_output \
-  --new-path hpc/runs/demo_stream \
-  --video-name 03240068-crop-5fps
-```
-
-Use with visualization:
-
-```bash
-python apps/camera_trap/cli/visualize_test_output.py \
-  --output-root hpc/runs/demo_stream \
-  --video-stem 03240068-crop-5fps \
-  --video-dir assets/videos \
-  --depth-source old
-```
-
-`compare_depth_outputs.py` computes quantitative overlap metrics and writes plots/panels:
-
-```bash
-python apps/camera_trap/scripts/compare_depth_outputs.py \
-  --old-results-dir da3_streaming/exps/extract_images_/2026-03-04-20-15-48/results_output \
-  --new-path hpc/runs/demo_stream \
-  --video-name 03240068-crop-5fps \
-  --output-dir hpc/runs/demo_stream/depth_compare_03240068
-```
-
-Plot old vs new depth-mask mean time series:
-
-```bash
-python apps/camera_trap/scripts/plot_depth_metrics.py \
-  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
-  --mode mask_means \
-  --x-axis frame
-```
-
-Plot only the difference (`depth_mask_mean_old - depth_mask_mean`):
-
-```bash
-python apps/camera_trap/scripts/plot_depth_metrics.py \
-  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
-  --mode mask_diff \
-  --x-axis frame
-```
-
-Plot per-track-ID mask-mean depth (`new`, `old`, or `both`):
-
-```bash
-python apps/camera_trap/scripts/plot_depth_metrics.py \
-  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
-  --mode id_means \
-  --id-depth-source both \
-  --max-ids 20 \
-  --x-axis frame
-```
+Depth-analysis and comparison utilities are documented separately in
+[`apps/camera_trap/scripts/README.md`](../apps/camera_trap/scripts/README.md).
 
 ## Output conventions
 

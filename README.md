@@ -108,18 +108,16 @@ python apps/camera_trap/cli/dap3_cli.py \
 - Input video: `assets/videos/demo.MP4`
 - Suggested output directory: `outputs/demo/`
 - Visualization CLI: `python apps/camera_trap/cli/visualize_test_output.py ...`
-- Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb) (kept for ad-hoc exploration; CLI is the repeatable/default path)
+- Visualization notebook: [`notebooks/camera_trap/visualize_test_output.ipynb`](./notebooks/camera_trap/visualize_test_output.ipynb)
 - Pass `--video-dir` for stem-based auto-resolution and selection from `run_manifest.json`.
 - Use `--video-path` only for direct single-video mode.
 - Use `--depth-source new|old` to choose which depth maps are rendered (`old` expects merged `*_old` keys in NPZ).
 
-Video preprocessing helper:
+Preprocessing helpers:
 - `hpc/scripts/crop_videos.sh` crops a fixed bottom percentage from all videos in a directory (requires `ffmpeg`).
-- Example: `hpc/scripts/crop_videos.sh --suffix assets/videos -p 9.75`
 - `hpc/scripts/reduce_video_fps.sh` creates reduced-FPS duplicates for all videos in a directory.
-- Example: `hpc/scripts/reduce_video_fps.sh assets/videos --fps 5`
 
-Interactive example:
+Basic interactive example:
 
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
@@ -130,37 +128,19 @@ python apps/camera_trap/cli/visualize_test_output.py \
   --page-size 2
 ```
 
-Interactive selection example (multiple videos in one run root):
-
-```bash
-python apps/camera_trap/cli/visualize_test_output.py \
-  --output-root outputs/demo \
-  --video-dir assets/videos \
-  --view processed
-```
-
-List videos and exit:
-
-```bash
-python apps/camera_trap/cli/visualize_test_output.py \
-  --output-root outputs/demo \
-  --video-dir assets/videos \
-  --list-videos
-```
-
-Full-timeline overlay video export (single selected video):
+Overlay export example:
 
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
   --output-root outputs/demo \
   --video-stem demo \
   --video-dir assets/videos \
-  --view processed \
+  --no-gui \
   --write-video outputs/demo/demo_overlay.mp4 \
-  --ov-mask --ov-bbox --ov-center --ov-hud
+  --export-style rgb
 ```
 
-Analysis-style depth overlay export (no histogram panel; outline-only masks; per-object mean mask-depth labels; full-height external scale bar):
+Analysis-depth overlay export:
 
 ```bash
 python apps/camera_trap/cli/visualize_test_output.py \
@@ -170,17 +150,6 @@ python apps/camera_trap/cli/visualize_test_output.py \
   --no-gui \
   --write-video outputs/demo/demo_analysis_overlay.mp4 \
   --export-style analysis-depth
-```
-
-Headless export-only example (no GUI windows):
-
-```bash
-python apps/camera_trap/cli/visualize_test_output.py \
-  --output-root outputs/demo \
-  --video-stem demo \
-  --video-dir assets/videos \
-  --no-gui \
-  --write-video outputs/demo/demo_overlay.mp4
 ```
 
 Batch export-all example:
@@ -199,59 +168,7 @@ Batch naming:
 - `--export-style rgb` writes `<stem>_overlay.mp4`
 - `--export-style analysis-depth` writes `<stem>_analysis_overlay.mp4`
 
-Depth analysis helpers now live in `apps/camera_trap/scripts` (not `hpc/scripts`) since they are reusable locally and on HPC.
-
-Merge legacy depth maps into a stream NPZ for side-by-side visualization source switching:
-
-```bash
-python apps/camera_trap/scripts/merge_old_depth_into_stream_npz.py \
-  --old-results-dir da3_streaming/exps/extract_images_/2026-03-04-20-15-48/results_output \
-  --new-path hpc/runs/demo_stream \
-  --video-name 03240068-crop-5fps
-```
-
-This merge also writes per-frame `depth_mask_mean_old` in the per-video JSON, while preserving
-existing `depth_mask_mean`.
-
-Then visualize old maps via:
-
-```bash
-python apps/camera_trap/cli/visualize_test_output.py \
-  --output-root hpc/runs/demo_stream \
-  --video-stem 03240068-crop-5fps \
-  --video-dir assets/videos \
-  --depth-source old \
-  --view both
-```
-
-Plot `depth_mask_mean` (new) vs `depth_mask_mean_old` (merged old):
-
-```bash
-python apps/camera_trap/scripts/plot_depth_metrics.py \
-  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
-  --mode mask_means \
-  --x-axis frame
-```
-
-Plot the mean-depth difference (`depth_mask_mean_old - depth_mask_mean`):
-
-```bash
-python apps/camera_trap/scripts/plot_depth_metrics.py \
-  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
-  --mode mask_diff \
-  --x-axis frame
-```
-
-Plot per-track-ID mean depth (from object masks) using new and old merged depth maps:
-
-```bash
-python apps/camera_trap/scripts/plot_depth_metrics.py \
-  --video-json hpc/runs/demo_stream/03240068-crop-5fps/03240068-crop-5fps.json \
-  --mode id_means \
-  --id-depth-source both \
-  --max-ids 20 \
-  --x-axis frame
-```
+Depth-analysis helpers are documented separately in [`apps/camera_trap/scripts/README.md`](./apps/camera_trap/scripts/README.md).
 
 ## HPC Execution
 
