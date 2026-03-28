@@ -4,6 +4,28 @@ These utilities operate on existing camera-trap outputs (`<video>.json` and `<vi
 
 ## Scripts
 
+### `validate_mask_rle_roundtrip.py`
+
+Validates transitional `both`-mode camera-trap outputs by comparing each stored raw mask
+against the mask recovered from its paired COCO RLE payload. Writes per-video CSV detail
+reports, a run-level summary JSON, and optional visual comparison videos.
+
+Example:
+
+```bash
+python apps/camera_trap/scripts/validate_mask_rle_roundtrip.py \
+  --run-root hpc/runs/dap3_predict_array-sam3-safari-neg-parents-da3nested-giant-large-batch-ape-fps6p0-track-1-3324174 \
+  --output-dir hpc/runs/dap3_predict_array-sam3-safari-neg-parents-da3nested-giant-large-batch-ape-fps6p0-track-1-3324174/mask_rle_validation \
+  --allow-missing-video
+```
+
+Notes:
+- Exit code is non-zero if any raw/RLE pair fails exact equality.
+- Visual comparison videos render processed frames only.
+- The right-hand panel in each comparison video shows the union of all per-entry diffs for that frame.
+- This script is intended for pre-cutover validation runs written with `--mask-storage-format both`;
+  default pipeline outputs now use RLE-only storage.
+
 ### `plot_depth_metrics.py`
 
 Plots depth metrics from per-video outputs.

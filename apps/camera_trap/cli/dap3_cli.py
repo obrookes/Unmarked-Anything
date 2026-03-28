@@ -162,7 +162,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--mask-storage-format",
         choices=MASK_STORAGE_FORMAT_CHOICES,
-        default="both",
+        default="rle",
         help=(
             "Mask persistence format in *_arrays.npz: "
             "'raw' writes dense uint8 masks, "

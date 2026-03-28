@@ -81,6 +81,7 @@ Notes:
 - `da3_batch_size` is passed through directly to the CLI and must be a positive integer.
 - `da3_mode=stream` runs in-memory DA3-Streaming on all sampled frames and requires a valid `da3_stream_config`.
 - `da3_mode=all_frames` runs standard DA3 on all sampled frames in memory; output persistence remains SAM-positive (`processed`) frames.
+- Mask persistence defaults to RLE-only. Use `--mask-storage-format both` only for validation runs where you need paired raw+RLE artifacts.
 - `sam3_track_isolation` and `sam3_track_tail_policy` are only relevant when `sam3_mode=track`.
 
 ### 2) Submit array
@@ -218,6 +219,25 @@ hpc/scripts/reduce_video_fps.sh assets/videos --fps 5
 ### `hpc/scripts/summarize_track_run.py`
 
 Summarizes per-video JSON outputs to highlight tracking anomalies (sampled frame counts, first track IDs, warnings).
+
+## RLE Validation
+
+For explicit validation runs written in `both` mode, validate raw-vs-RLE round-trip correctness
+with:
+
+```bash
+python apps/camera_trap/scripts/validate_mask_rle_roundtrip.py \
+  --run-root hpc/runs/<dap3-run-dir> \
+  --output-dir hpc/runs/<dap3-run-dir>/mask_rle_validation \
+  --allow-missing-video
+```
+
+This writes:
+- a run-level summary JSON
+- per-video CSV detail reports
+- comparison videos showing raw overlay, decoded-RLE overlay, and per-frame diff masks
+
+The validator exits non-zero if any paired raw/RLE masks fail exact equality.
 
 ```bash
 python hpc/scripts/summarize_track_run.py --run-dir hpc/runs/<run_tag>

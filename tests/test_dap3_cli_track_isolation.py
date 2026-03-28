@@ -23,7 +23,7 @@ def test_parse_args_track_defaults() -> None:
     assert args.sam3_track_isolation == "recreate"
     assert args.sam3_track_tail_policy == "warn_and_finalize"
     assert args.da3_mode == "batch"
-    assert args.mask_storage_format == "both"
+    assert args.mask_storage_format == "rle"
 
 
 def test_parse_args_track_overrides() -> None:
