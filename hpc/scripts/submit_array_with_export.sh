@@ -74,7 +74,7 @@ fi
 predict_cmd=(
   sbatch
   --array="1-${count}"
-  --export=ALL,MANIFEST="$MANIFEST"
+  --export=ALL,MANIFEST="$MANIFEST",WRITE_NPZ=1
   "$JOB_SCRIPT"
 )
 

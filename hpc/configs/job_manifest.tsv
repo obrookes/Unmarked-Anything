@@ -1,7 +1,7 @@
 input_video_dir	sam3_model_path	sam3_text_prompts_csv	da3_model_id	da3_mode(batch|stream|all_frames)	da3_stream_config	target_fps	sam3_mode	device	conf	use_half	overwrite	max_videos	da3_batch_size	sam3_track_isolation	sam3_track_tail_policy	write_npz
-assets/videos	weights/sam3/sam3-safari-neg-parents.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	batch	da3_streaming/configs/base_config.yaml	6.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize	1
-assets/videos	weights/sam3/sam3-safari-neg-parents.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	stream	da3_streaming/configs/base_config.yaml	6.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize	1
-assets/videos	weights/sam3/sam3-safari-neg-parents.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	all_frames	da3_streaming/configs/base_config.yaml	6.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize	1
+assets/videos	weights/sam3/sam3-safari-neg-parents.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	batch	da3_streaming/configs/base_config.yaml	6.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize	0
+assets/videos	weights/sam3/sam3-safari-neg-parents.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	stream	da3_streaming/configs/base_config.yaml	6.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize	0
+assets/videos	weights/sam3/sam3-safari-neg-parents.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	all_frames	da3_streaming/configs/base_config.yaml	6.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize	0
 #assets/videos	weights/sam3/sam3.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	batch	da3_streaming/configs/base_config.yaml	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize	0
 #assets/videos	weights/sam3/sam3-safari-pos.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	batch	da3_streaming/configs/base_config.yaml	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize	0
 #assets/videos	weights/sam3/sam3-safari-pos.pt	ape	depth-anything/DA3NESTED-GIANT-LARGE	all_frames	da3_streaming/configs/base_config.yaml	1.0	track	auto	0.25	1	0	6	48	reset	warn_and_finalize	0

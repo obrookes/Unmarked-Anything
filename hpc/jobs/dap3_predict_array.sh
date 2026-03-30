@@ -78,7 +78,7 @@ MAX_VIDEOS="${F[12]:-}"
 DA3_BATCH_SIZE="${F[13]:-}"
 SAM3_TRACK_ISOLATION="${F[14]:-recreate}"
 SAM3_TRACK_TAIL_POLICY="${F[15]:-warn_and_finalize}"
-WRITE_NPZ="${F[16]:-0}"
+WRITE_NPZ="${WRITE_NPZ:-${F[16]:-0}}"
 
 if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" || -z "$SAM3_TEXT_PROMPTS" || -z "$DA3_BATCH_SIZE" ]]; then
   echo "Invalid manifest line (missing required fields): $LINE" >&2
