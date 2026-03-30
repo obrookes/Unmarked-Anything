@@ -131,6 +131,11 @@ def _find_single_json(dir_path: Path) -> Path:
 
 def _find_single_arrays(dir_path: Path) -> Path:
     candidates = sorted(dir_path.glob("*_arrays.npz"))
+    if len(candidates) == 0:
+        raise RuntimeError(
+            f"No *_arrays.npz found in {dir_path}. "
+            "Re-run the pipeline with --npz to write the NPZ file."
+        )
     if len(candidates) != 1:
         raise RuntimeError(f"Expected exactly one *_arrays.npz in {dir_path}, found {len(candidates)}.")
     return candidates[0]

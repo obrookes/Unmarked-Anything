@@ -41,7 +41,10 @@ def load_artifacts(output_root: Path, video_stem: str | None) -> tuple[dict[str,
     if not json_path.is_file():
         raise FileNotFoundError(f"Missing JSON output: {json_path}")
     if not npz_path.is_file():
-        raise FileNotFoundError(f"Missing NPZ output: {npz_path}")
+        raise FileNotFoundError(
+            f"Missing NPZ output: {npz_path}\n"
+            "Re-run the pipeline with --npz to write the *_arrays.npz file."
+        )
 
     video_json: dict[str, Any] = json.loads(json_path.read_text())
     npz_data = np.load(npz_path, allow_pickle=False)

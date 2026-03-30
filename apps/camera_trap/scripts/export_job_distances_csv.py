@@ -72,12 +72,23 @@ def parse_args() -> argparse.Namespace:
 
 def discover_video_jsons(job_dir: Path) -> list[Path]:
     json_paths: list[Path] = []
+    skipped: list[Path] = []
     for path in sorted(job_dir.rglob("*.json")):
         if path.name == "run_manifest.json":
             continue
         npz_path = path.with_name(f"{path.stem}_arrays.npz")
         if npz_path.is_file():
             json_paths.append(path)
+        else:
+            skipped.append(path)
+    if skipped:
+        print(
+            f"Warning: skipped {len(skipped)} JSON file(s) with no paired *_arrays.npz "
+            f"(re-run the pipeline with --npz to generate NPZ output):",
+            file=sys.stderr,
+        )
+        for p in skipped:
+            print(f"  {p}", file=sys.stderr)
     return json_paths
 
 

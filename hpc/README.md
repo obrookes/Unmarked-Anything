@@ -70,6 +70,7 @@ OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
 14. `da3_batch_size` (required, positive integer)
 15. `sam3_track_isolation` (optional: `recreate`, `reset`, `both`; default `recreate`)
 16. `sam3_track_tail_policy` (optional: `warn_and_finalize`, `fail_fast`; default `warn_and_finalize`)
+17. `write_npz` (optional: `0`/`1`; default `0` — set to `1` to write `*_arrays.npz` alongside the JSON)
 
 Notes:
 - Comment lines start with `#`.
@@ -81,6 +82,7 @@ Notes:
 - `da3_batch_size` is passed through directly to the CLI and must be a positive integer.
 - `da3_mode=stream` runs in-memory DA3-Streaming on all sampled frames and requires a valid `da3_stream_config`.
 - `da3_mode=all_frames` runs standard DA3 on all sampled frames in memory; output persistence remains SAM-positive (`processed`) frames.
+- By default only the JSON output is written. Set `write_npz=1` in the manifest (or pass `--npz` directly) to also write `*_arrays.npz`. The NPZ is required by downstream tools such as `export_job_distances_csv.py`, `validate_mask_rle_roundtrip.py`, and the overlay export workflow.
 - Mask persistence defaults to RLE-only. Use `--mask-storage-format both` only for validation runs where you need paired raw+RLE artifacts.
 - `sam3_track_isolation` and `sam3_track_tail_policy` are only relevant when `sam3_mode=track`.
 
@@ -102,7 +104,8 @@ The helper auto-counts runnable manifest rows and submits `--array=1-N`.
 
 This workflow submits the prediction array, then submits a dependent export job that runs
 `visualize_test_output.py` in `--no-gui --export-all` mode for all run directories matching
-`*-${predict_array_job_id}` under `OUTPUT_ROOT`.
+`*-${predict_array_job_id}` under `OUTPUT_ROOT`. The export job requires `*_arrays.npz` files;
+set `write_npz=1` in the manifest when using this workflow.
 
 ```bash
 hpc/scripts/submit_array_with_export.sh

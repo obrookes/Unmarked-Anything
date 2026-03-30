@@ -45,15 +45,15 @@ LINE="${JOB_LINES[$TASK_INDEX]}"
 IFS=$'\t' read -r -a F <<< "$LINE"
 
 # Manifest format columns:
-# 1 input_video_dir
-# 2 sam3_model_path
-# 3 sam3_text_prompts_csv
-# 4 da3_model_id
-# 5 da3_mode (optional: batch|stream|all_frames, default batch)
-# 6 da3_stream_config (optional path, used in stream mode)
-# 7 target_fps
-# 8 sam3_mode
-# 9 device
+# 1  input_video_dir
+# 2  sam3_model_path
+# 3  sam3_text_prompts_csv
+# 4  da3_model_id
+# 5  da3_mode (optional: batch|stream|all_frames, default batch)
+# 6  da3_stream_config (optional path, used in stream mode)
+# 7  target_fps
+# 8  sam3_mode
+# 9  device
 # 10 conf
 # 11 use_half
 # 12 overwrite
@@ -61,6 +61,7 @@ IFS=$'\t' read -r -a F <<< "$LINE"
 # 14 da3_batch_size
 # 15 sam3_track_isolation (optional: recreate|reset|both)
 # 16 sam3_track_tail_policy (optional: warn_and_finalize|fail_fast)
+# 17 write_npz (optional: 0|1, default 0 — set to 1 to write *_arrays.npz)
 INPUT_VIDEO_DIR="${F[0]:-}"
 SAM3_MODEL_PATH="${F[1]:-}"
 SAM3_TEXT_PROMPTS="${F[2]:-}"
@@ -77,6 +78,7 @@ MAX_VIDEOS="${F[12]:-}"
 DA3_BATCH_SIZE="${F[13]:-}"
 SAM3_TRACK_ISOLATION="${F[14]:-recreate}"
 SAM3_TRACK_TAIL_POLICY="${F[15]:-warn_and_finalize}"
+WRITE_NPZ="${F[16]:-0}"
 
 if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" || -z "$SAM3_TEXT_PROMPTS" || -z "$DA3_BATCH_SIZE" ]]; then
   echo "Invalid manifest line (missing required fields): $LINE" >&2
@@ -205,6 +207,9 @@ fi
 CMD+=(--da3-batch-size "$DA3_BATCH_SIZE")
 CMD+=(--sam3-track-isolation "$SAM3_TRACK_ISOLATION")
 CMD+=(--sam3-track-tail-policy "$SAM3_TRACK_TAIL_POLICY")
+if [[ "$WRITE_NPZ" == "1" ]]; then
+  CMD+=(--npz)
+fi
 
 echo "Host: $(hostname)"
 echo "Start time: $(date)"

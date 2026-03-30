@@ -30,6 +30,7 @@ MAX_VIDEOS="${MAX_VIDEOS:-}"
 DA3_BATCH_SIZE="${DA3_BATCH_SIZE:-}"
 SAM3_TRACK_ISOLATION="${SAM3_TRACK_ISOLATION:-recreate}"
 SAM3_TRACK_TAIL_POLICY="${SAM3_TRACK_TAIL_POLICY:-warn_and_finalize}"
+WRITE_NPZ="${WRITE_NPZ:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/hpc/runs}"
 USE_SCRATCH="${USE_SCRATCH:-1}"
 
@@ -121,6 +122,9 @@ fi
 CMD+=(--da3-batch-size "$DA3_BATCH_SIZE")
 CMD+=(--sam3-track-isolation "$SAM3_TRACK_ISOLATION")
 CMD+=(--sam3-track-tail-policy "$SAM3_TRACK_TAIL_POLICY")
+if [[ "$WRITE_NPZ" == "1" ]]; then
+  CMD+=(--npz)
+fi
 
 echo "Command: ${CMD[*]}"
 "${CMD[@]}"

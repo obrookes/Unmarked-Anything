@@ -170,6 +170,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "'both' writes both and keeps the dense key as the canonical reader key."
         ),
     )
+    parser.add_argument(
+        "--npz",
+        action="store_true",
+        help="Also write the *_arrays.npz file alongside the JSON output.",
+    )
 
     args = parser.parse_args(argv)
     if args.target_fps <= 0:
@@ -794,14 +799,15 @@ def process_video(
     json_path = video_out_dir / f"{video_stem}.json"
     npz_path = video_out_dir / f"{video_stem}_arrays.npz"
 
-    if not args.overwrite and json_path.exists() and npz_path.exists():
+    already_done = json_path.exists() and (not args.npz or npz_path.exists())
+    if not args.overwrite and already_done:
         return {
             "video_name": video_stem,
             "video_path": str(video_path.resolve()),
             "status": "skipped_existing",
             "error": None,
             "json_path": str(json_path.resolve()),
-            "npz_path": str(npz_path.resolve()),
+            "npz_path": None if not args.npz else str(npz_path.resolve()),
             "counts": {
                 "sampled_frames": 0,
                 "processed_frames": 0,
@@ -881,8 +887,10 @@ def process_video(
         frame_prefix = f"f{frame_idx}"
         depth_key = f"{frame_prefix}_depth"
         prompt_order_key = f"{frame_prefix}_prompt_order"
-        npz_arrays[depth_key] = np.asarray(depth, dtype=np.float32)
-        npz_arrays[prompt_order_key] = np.asarray(args.sam3_text_prompts, dtype=np.str_)
+        _npz_sink = npz_arrays if args.npz else {}
+        if args.npz:
+            npz_arrays[depth_key] = np.asarray(depth, dtype=np.float32)
+            npz_arrays[prompt_order_key] = np.asarray(args.sam3_text_prompts, dtype=np.str_)
 
         mask_key_rows = []
         for prompt_idx, (prompt, prompt_slug, mask) in enumerate(
@@ -890,7 +898,7 @@ def process_video(
         ):
             mask_key_rows.append(
                 build_mask_storage_entry(
-                    npz_arrays=npz_arrays,
+                    npz_arrays=_npz_sink,
                     key_prefix=f"{frame_prefix}_mask_{prompt_slug}",
                     mask=mask,
                     base_entry={
@@ -906,7 +914,7 @@ def process_video(
             obj_idx = int(obj.get("object_index", len(object_key_rows)))
             object_key_rows.append(
                 build_mask_storage_entry(
-                    npz_arrays=npz_arrays,
+                    npz_arrays=_npz_sink,
                     key_prefix=f"{frame_prefix}_obj_{obj_idx}_mask",
                     mask=np.asarray(obj.get("mask"), dtype=np.uint8),
                     base_entry={
@@ -925,7 +933,7 @@ def process_video(
                 )
             )
         rec["objects"] = object_key_rows
-        rec["npz_keys"] = {
+        rec["npz_keys"] = None if not args.npz else {
             "depth": depth_key,
             "prompt_order": prompt_order_key,
             "masks": mask_key_rows,
@@ -1361,7 +1369,8 @@ def process_video(
             flush_da3_all_frames_inference()
         else:
             flush_pending_da3()
-        write_npz_atomic(npz_path, npz_arrays)
+        if args.npz:
+            write_npz_atomic(npz_path, npz_arrays)
         video_json["status"] = "success"
     except Exception as exc:
         video_json["status"] = "failed"
@@ -1382,7 +1391,7 @@ def process_video(
         "status": video_json["status"],
         "error": video_json["error"],
         "json_path": str(json_path.resolve()),
-        "npz_path": str(npz_path.resolve()),
+        "npz_path": None if not args.npz else str(npz_path.resolve()),
         "counts": counts,
         "duration_sec": float(duration_sec),
     }
