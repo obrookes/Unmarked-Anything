@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,13 @@ from typing import Any
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SRC_PATH = REPO_ROOT / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+
+from depth_anything_3.utils.camera_trap_masks import load_mask_bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -385,10 +393,13 @@ def _plot_id_means(
                 except (TypeError, ValueError):
                     continue
                 mask_key = obj.get("key")
-                if not mask_key or mask_key not in npz_data:
+                if not mask_key:
                     continue
                 confidence = _to_float_or_nan(obj.get("confidence"))
-                mask = np.asarray(npz_data[mask_key]).astype(bool)
+                try:
+                    mask = load_mask_bool(npz_data=npz_data, entry=obj)
+                except KeyError:
+                    continue
                 if mask.size == 0 or not np.any(mask):
                     continue
                 if np.isfinite(timestamp_sec):

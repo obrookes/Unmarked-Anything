@@ -35,6 +35,7 @@ dependencies = [
     "plyfile",
     "pillow_heif",
     "safetensors",
+    "pycocotools",
     "uvicorn",
     "moviepy==1.0.3",
     "typer>=0.9.0",

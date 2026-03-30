@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
 
+from depth_anything_3.utils.camera_trap_masks import load_mask_bool
+
 
 def resolve_video_stem(output_root: Path, video_stem: str | None) -> tuple[str, dict[str, Any] | None]:
     manifest_path = output_root / "run_manifest.json"
@@ -122,11 +124,11 @@ def build_union_mask(npz_data: np.lib.npyio.NpzFile, frame_row: dict[str, Any]) 
         key = entry.get("key")
         if not key:
             continue
-        if key not in npz_data:
+        try:
+            mask_bool = load_mask_bool(npz_data=npz_data, entry=entry)
+        except KeyError:
             missing_keys.append(key)
             continue
-        mask_arr = np.asarray(npz_data[key])
-        mask_bool = mask_arr.astype(bool)
         if union_mask is None:
             union_mask = mask_bool.copy()
         else:
@@ -154,10 +156,11 @@ def build_object_masks(npz_data: np.lib.npyio.NpzFile, frame_row: dict[str, Any]
         key = obj.get("key")
         if not key:
             continue
-        if key not in npz_data:
+        try:
+            mask_arr = load_mask_bool(npz_data=npz_data, entry=obj)
+        except KeyError:
             missing_keys.append(str(key))
             continue
-        mask_arr = np.asarray(npz_data[key]).astype(bool)
         objects.append(
             {
                 "object_index": int(obj.get("object_index", len(objects))),

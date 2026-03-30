@@ -76,6 +76,9 @@ python apps/camera_trap/cli/dap3_cli.py \
   --da3-batch-size 4
 ```
 
+Default mask persistence now writes COCO RLE only. Use `--mask-storage-format both` when you need
+paired raw+RLE outputs for transitional validation or storage comparisons.
+
 Legacy wrapper also works: `python dap3_cli.py ...`
 
 Streaming mode example (DA3-Streaming on all sampled frames):
@@ -188,7 +191,8 @@ python apps/camera_trap/cli/dap3_cli.py \
   --target-fps 1.0 \
   --sam3-mode track \
   --conf 0.25 \
-  --device auto
+  --device auto \
+  --mask-storage-format rle
 ```
 
 ## CLI Options (All)
@@ -209,6 +213,7 @@ python apps/camera_trap/cli/dap3_cli.py \
 | `--conf` | float | no | `0.25` | SAM3 confidence threshold. |
 | `--device` | enum | no | `auto` | `auto`, `cuda`, or `cpu`. |
 | `--half` | flag | no | `false` | Enable FP16 for SAM3 (CUDA only). |
+| `--mask-storage-format` | enum | no | `rle` | Mask persistence mode: `raw`, `rle`, or `both`. Use `both` only when you need paired raw+RLE artifacts for validation. |
 | `--sam3-track-isolation` | enum | no | `recreate` | Track-mode predictor isolation per video: `recreate`, `reset`, or `both`. |
 | `--sam3-track-tail-policy` | enum | no | `warn_and_finalize` | `warn_and_finalize` keeps partial output on SAM3 stream `IndexError`; `fail_fast` marks the video failed. |
 | `--overwrite` | flag | no | `false` | Reprocess even if output JSON + NPZ already exist. |
