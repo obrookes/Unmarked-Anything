@@ -912,11 +912,26 @@ def process_video(
         object_key_rows = []
         for obj in object_entries:
             obj_idx = int(obj.get("object_index", len(object_key_rows)))
+            obj_mask = np.asarray(obj.get("mask"), dtype=np.uint8)
+            obj_mask_bool = obj_mask > 0
+            if obj_mask_bool.shape != depth.shape:
+                obj_mask_bool = cv2.resize(
+                    obj_mask_bool.astype(np.uint8),
+                    (depth.shape[1], depth.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+            obj_depth_values = depth[obj_mask_bool]
+            obj_depth_mask_mean = float(np.nanmean(obj_depth_values)) if obj_depth_values.size > 0 else None
+            obj_center_xy = obj.get("center_xy")
+            obj_depth_center_value = None
+            if obj_center_xy is not None:
+                cx, cy = obj_center_xy
+                obj_depth_center_value = float(depth[cy, cx])
             object_key_rows.append(
                 build_mask_storage_entry(
                     npz_arrays=_npz_sink,
                     key_prefix=f"{frame_prefix}_obj_{obj_idx}_mask",
-                    mask=np.asarray(obj.get("mask"), dtype=np.uint8),
+                    mask=obj_mask,
                     base_entry={
                         "object_index": obj_idx,
                         "track_id": obj.get("track_id"),
@@ -926,8 +941,10 @@ def process_video(
                         "prompt": obj.get("prompt"),
                         "slug": obj.get("slug"),
                         "bbox_xyxy": obj.get("bbox_xyxy"),
-                        "center_xy": obj.get("center_xy"),
+                        "center_xy": obj_center_xy,
                         "mask_nonzero_pixels": int(obj.get("mask_nonzero_pixels") or 0),
+                        "depth_mask_mean": obj_depth_mask_mean,
+                        "depth_center_value": obj_depth_center_value,
                     },
                     storage_format=args.mask_storage_format,
                 )
