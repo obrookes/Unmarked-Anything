@@ -615,7 +615,8 @@ def extract_prompt_masks_and_objects(
 
 
 def run_da3_inference_batch(da3: DepthAnything3, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
-    depth_pred = da3.inference(frames_bgr, use_ray_pose=False, infer_gs=False, export_dir=None)
+    frames_rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames_bgr]
+    depth_pred = da3.inference(frames_rgb, use_ray_pose=False, infer_gs=False, export_dir=None)
     return [np.asarray(depth_map, dtype=np.float32) for depth_map in depth_pred.depth]
 
 
