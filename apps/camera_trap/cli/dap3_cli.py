@@ -878,7 +878,8 @@ def process_video(
             )
 
         depth_values = depth[union_mask_bool]
-        rec["depth_mask_mean"] = float(np.nanmean(depth_values)) if depth_values.size > 0 else None
+        finite_depth_values = depth_values[np.isfinite(depth_values)]
+        rec["depth_mask_mean"] = float(np.mean(finite_depth_values)) if finite_depth_values.size > 0 else None
         if center_xy is not None:
             cx, cy = center_xy
             rec["depth_center_value"] = float(depth[cy, cx])
@@ -922,7 +923,8 @@ def process_video(
                     interpolation=cv2.INTER_NEAREST,
                 ).astype(bool)
             obj_depth_values = depth[obj_mask_bool]
-            obj_depth_mask_mean = float(np.nanmean(obj_depth_values)) if obj_depth_values.size > 0 else None
+            finite_obj_depth_values = obj_depth_values[np.isfinite(obj_depth_values)]
+            obj_depth_mask_mean = float(np.mean(finite_obj_depth_values)) if finite_obj_depth_values.size > 0 else None
             obj_center_xy = obj.get("center_xy")
             obj_depth_center_value = None
             if obj_center_xy is not None:
