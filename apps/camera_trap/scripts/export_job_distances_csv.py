@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import subprocess
 import sys
 from datetime import datetime
@@ -208,6 +209,7 @@ def build_rows_for_video(
     if fps_value <= 0:
         return rows
 
+    frame_width = int(video_json.get("frame_width") or 0)
     step_frames = max(1, int(round(interval_seconds * fps_value)))
     window_frames = max(1, int(round(window_seconds * fps_value)))
     frames = video_json.get("frames") or []
@@ -231,7 +233,7 @@ def build_rows_for_video(
         last_idx = frame_indices[-1]
         present_indices = set(frame_indices)
 
-        sampled_idx = first_idx
+        sampled_idx = math.ceil(first_idx / step_frames) * step_frames
         while sampled_idx <= last_idx:
             window_distances: list[float] = []
             window_confidences: list[float] = []
@@ -239,6 +241,9 @@ def build_rows_for_video(
                 if frame_idx not in present_indices:
                     continue
                 entry = frame_to_entry[frame_idx]
+                bbox = entry.get("bbox_xyxy") or []
+                if frame_width > 0 and len(bbox) >= 3 and (bbox[0] <= 0 or bbox[2] >= frame_width):
+                    continue
                 distance = entry.get("depth_mask_mean")
                 if distance is not None:
                     window_distances.append(float(distance))
