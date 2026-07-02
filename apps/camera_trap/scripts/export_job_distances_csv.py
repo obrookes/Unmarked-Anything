@@ -46,19 +46,76 @@ def parse_args() -> argparse.Namespace:
         "--interval-seconds",
         type=float,
         required=True,
-        help="Sampling interval in seconds, applied per object from first appearance.",
+        help="Sampling interval in seconds; sample points are aligned to the global grid 0, interval, 2*interval, ...",
     )
     parser.add_argument(
         "--window-seconds",
         type=float,
         default=1.0,
-        help="Duration in seconds of the averaging window centred on each sample point (default: 1.0).",
+        help="Duration in seconds of the averaging window at each sample point (default: 1.0).",
+    )
+    # --- Quality-control filters ---
+    parser.add_argument(
+        "--no-filter",
+        action="store_true",
+        default=False,
+        help="Disable all quality-control filters and emit every detected track.",
+    )
+    parser.add_argument(
+        "--min-track-frames",
+        type=int,
+        default=5,
+        help="Exclude tracks detected in fewer than this many frames (default: 5). Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--max-static-displacement",
+        type=float,
+        default=5.0,
+        help=(
+            "Exclude tracks whose bbox centre never moves more than this many pixels total "
+            "(default: 5.0). Catches stationary false-positive detections. Set 0.0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--iou-dedup-threshold",
+        type=float,
+        default=0.5,
+        help=(
+            "IoU threshold above which two concurrent detections are considered duplicates; "
+            "the shorter track is dropped (default: 0.5). Use > 1.0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--min-bbox-area-frac",
+        type=float,
+        default=0.01,
+        help=(
+            "Exclude per-frame detections whose bbox area is smaller than this fraction of the "
+            "frame area (default: 0.01 = 1%%). Set 0.0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.5,
+        help="Exclude tracks whose confidence score is below this threshold (default: 0.5). Set 0.0 to disable.",
     )
     args = parser.parse_args()
     if args.interval_seconds <= 0:
         parser.error("--interval-seconds must be > 0.")
     if args.window_seconds <= 0:
         parser.error("--window-seconds must be > 0.")
+    if not args.no_filter:
+        if args.min_track_frames < 0:
+            parser.error("--min-track-frames must be >= 0.")
+        if args.max_static_displacement < 0.0:
+            parser.error("--max-static-displacement must be >= 0.0.")
+        if not (0.0 <= args.min_bbox_area_frac < 1.0):
+            parser.error("--min-bbox-area-frac must be in [0.0, 1.0).")
+        if not (0.0 <= args.min_confidence <= 1.0):
+            parser.error("--min-confidence must be in [0.0, 1.0].")
+        if args.iou_dedup_threshold < 0.0:
+            parser.error("--iou-dedup-threshold must be >= 0.0 (use > 1.0 to disable).")
     return args
 
 
@@ -196,12 +253,31 @@ def collect_track_samples(frames: list[dict[str, Any]]) -> dict[Any, dict[int, d
     return track_samples
 
 
+def compute_iou(a: list, b: list) -> float:
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter == 0.0:
+        return 0.0
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
 def build_rows_for_video(
     video_json: dict[str, Any],
     json_path: Path,
     interval_seconds: float,
     window_seconds: float,
     creation_dt: datetime | None,
+    *,
+    apply_filters: bool = True,
+    min_track_frames: int = 5,
+    max_static_displacement: float = 5.0,
+    min_bbox_area_frac: float = 0.01,
+    iou_dedup_threshold: float = 0.5,
+    min_confidence: float = 0.5,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     video_name = str(video_json.get("video_name") or json_path.stem)
@@ -210,10 +286,58 @@ def build_rows_for_video(
         return rows
 
     frame_width = int(video_json.get("frame_width") or 0)
+    frame_height = int(video_json.get("frame_height") or 0)
+    frame_area = frame_width * frame_height
     step_frames = max(1, int(round(interval_seconds * fps_value)))
     window_frames = max(1, int(round(window_seconds * fps_value)))
     frames = video_json.get("frames") or []
     track_samples = collect_track_samples(frames)
+
+    # --- Per-track and per-frame quality filters ---
+    excluded_tracks: set = set()
+    if apply_filters:
+        # Step A: per-track exclusions (short tracks, stationary objects, low confidence)
+        for track_id, frame_to_entry in track_samples.items():
+            if min_track_frames > 0 and len(frame_to_entry) < min_track_frames:
+                excluded_tracks.add(track_id)
+                continue
+            if max_static_displacement > 0.0:
+                centers = [e.get("center_xy") or [0, 0] for e in frame_to_entry.values()]
+                xs = [c[0] for c in centers]
+                ys = [c[1] for c in centers]
+                if max(max(xs) - min(xs), max(ys) - min(ys)) < max_static_displacement:
+                    excluded_tracks.add(track_id)
+                    continue
+            if min_confidence > 0.0:
+                conf = next(iter(frame_to_entry.values())).get("confidence")
+                if conf is None or float(conf) < min_confidence:
+                    excluded_tracks.add(track_id)
+
+        # Step B: IoU duplicate exclusion (pre-scan all frames once)
+        if iou_dedup_threshold <= 1.0:
+            frame_to_active: dict[int, list] = {}
+            for tid, f2e in track_samples.items():
+                if tid in excluded_tracks:
+                    continue
+                for fidx, entry in f2e.items():
+                    bbox = entry.get("bbox_xyxy") or []
+                    if len(bbox) >= 4:
+                        frame_to_active.setdefault(fidx, []).append((tid, bbox))
+
+            track_frame_count = {tid: len(f2e) for tid, f2e in track_samples.items()}
+            iou_excluded: set = set()
+            for active in frame_to_active.values():
+                for i in range(len(active)):
+                    for j in range(i + 1, len(active)):
+                        tid_a, bbox_a = active[i]
+                        tid_b, bbox_b = active[j]
+                        if tid_a in iou_excluded or tid_b in iou_excluded:
+                            continue
+                        if compute_iou(bbox_a, bbox_b) > iou_dedup_threshold:
+                            ca, cb = track_frame_count[tid_a], track_frame_count[tid_b]
+                            drop = tid_a if (ca < cb or (ca == cb and str(tid_a) > str(tid_b))) else tid_b
+                            iou_excluded.add(drop)
+            excluded_tracks |= iou_excluded
 
     starting_date = ""
     year = month = day = hour = minute = ""
@@ -226,6 +350,8 @@ def build_rows_for_video(
         minute = creation_dt.minute
 
     for track_id, frame_to_entry in sorted(track_samples.items(), key=lambda item: str(item[0])):
+        if track_id in excluded_tracks:
+            continue
         frame_indices = sorted(frame_to_entry.keys())
         if not frame_indices:
             continue
@@ -242,14 +368,21 @@ def build_rows_for_video(
                     continue
                 entry = frame_to_entry[frame_idx]
                 bbox = entry.get("bbox_xyxy") or []
+                # Bbox left/right edge clip check (always active)
                 if frame_width > 0 and len(bbox) >= 3 and (bbox[0] <= 0 or bbox[2] >= frame_width):
                     continue
+                # Tiny bbox area check (filter mode only)
+                if apply_filters and min_bbox_area_frac > 0.0 and frame_area > 0 and len(bbox) >= 4:
+                    if (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) / frame_area < min_bbox_area_frac:
+                        continue
+                # Depth: always skip missing or physically impossible values
                 distance = entry.get("depth_mask_mean")
-                if distance is not None:
-                    window_distances.append(float(distance))
-                    conf = entry.get("confidence")
-                    if conf is not None:
-                        window_confidences.append(float(conf))
+                if distance is None or float(distance) < 0.0:
+                    continue
+                window_distances.append(float(distance))
+                conf = entry.get("confidence")
+                if conf is not None:
+                    window_confidences.append(float(conf))
 
             if window_distances:
                 rows.append(
@@ -310,6 +443,12 @@ def main() -> None:
                 interval_seconds=args.interval_seconds,
                 window_seconds=args.window_seconds,
                 creation_dt=creation_dt,
+                apply_filters=not args.no_filter,
+                min_track_frames=args.min_track_frames,
+                max_static_displacement=args.max_static_displacement,
+                min_bbox_area_frac=args.min_bbox_area_frac,
+                iou_dedup_threshold=args.iou_dedup_threshold,
+                min_confidence=args.min_confidence,
             )
         )
 
@@ -321,9 +460,7 @@ def main() -> None:
 
     print(f"Wrote {len(all_rows)} rows to {args.output_csv}")
     if skipped_missing_fps:
-        print(
-            f"Skipped {skipped_missing_fps} videos because FPS was unavailable."
-        )
+        print(f"Skipped {skipped_missing_fps} videos because FPS was unavailable.")
 
 
 if __name__ == "__main__":
