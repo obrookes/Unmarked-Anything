@@ -119,15 +119,7 @@ def test_camera_trap_viz_build_union_mask_rle(tmp_path: Path) -> None:
     np.testing.assert_array_equal(union, np.array([[False, True], [True, False]]))
 
 
-def test_export_build_rows_for_video_rle(tmp_path: Path) -> None:
-    pytest.importorskip("pycocotools.mask")
-    mask = np.array([[1, 0], [1, 0]], dtype=np.uint8)
-    counts, size = encode_mask_to_coco_rle(mask)
-    npz_path = _write_npz(
-        tmp_path,
-        f0_depth=np.array([[2.0, 7.0], [4.0, 9.0]], dtype=np.float32),
-        f0_obj_0_mask_rle=np.asarray(counts, dtype=np.str_),
-    )
+def test_export_build_rows_for_video_json_depth(tmp_path: Path) -> None:
     video_json = {
         "video_name": "clip",
         "video_fps": 1.0,
@@ -137,9 +129,8 @@ def test_export_build_rows_for_video_rle(tmp_path: Path) -> None:
                 "objects": [
                     {
                         "track_id": 7,
-                        "key": "f0_obj_0_mask_rle",
-                        "encoding": MASK_ENCODING_COCO_RLE,
-                        "size": size,
+                        "depth_mask_mean": 3.0,
+                        "confidence": 0.9,
                     }
                 ],
             }
@@ -149,10 +140,10 @@ def test_export_build_rows_for_video_rle(tmp_path: Path) -> None:
     rows = export_job_distances_csv.build_rows_for_video(
         video_json=video_json,
         json_path=tmp_path / "clip.json",
-        npz_path=npz_path,
         interval_seconds=1.0,
-        fps_override=None,
+        window_seconds=1.0,
         creation_dt=None,
+        apply_filters=False,
     )
 
     assert len(rows) == 1
