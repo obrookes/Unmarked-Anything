@@ -1,6 +1,8 @@
 # Camera Trap Analysis Scripts
 
 These utilities operate on existing camera-trap outputs (`<video>.json` and `<video>_arrays.npz`).
+Scripts that read depth maps or masks from NPZ files require the pipeline to have been run with `--npz`
+(or `write_npz=1` in the TSV manifest), since NPZ output is not written by default.
 
 ## Scripts
 
