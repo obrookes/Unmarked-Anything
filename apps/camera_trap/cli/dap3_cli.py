@@ -615,7 +615,8 @@ def extract_prompt_masks_and_objects(
 
 
 def run_da3_inference_batch(da3: DepthAnything3, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
-    depth_pred = da3.inference(frames_bgr, use_ray_pose=False, infer_gs=False, export_dir=None)
+    frames_rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames_bgr]
+    depth_pred = da3.inference(frames_rgb, use_ray_pose=False, infer_gs=False, export_dir=None)
     return [np.asarray(depth_map, dtype=np.float32) for depth_map in depth_pred.depth]
 
 
@@ -877,7 +878,8 @@ def process_video(
             )
 
         depth_values = depth[union_mask_bool]
-        rec["depth_mask_mean"] = float(np.nanmean(depth_values)) if depth_values.size > 0 else None
+        finite_depth_values = depth_values[np.isfinite(depth_values)]
+        rec["depth_mask_mean"] = float(np.mean(finite_depth_values)) if finite_depth_values.size > 0 else None
         if center_xy is not None:
             cx, cy = center_xy
             rec["depth_center_value"] = float(depth[cy, cx])
@@ -912,11 +914,27 @@ def process_video(
         object_key_rows = []
         for obj in object_entries:
             obj_idx = int(obj.get("object_index", len(object_key_rows)))
+            obj_mask = np.asarray(obj.get("mask"), dtype=np.uint8)
+            obj_mask_bool = obj_mask > 0
+            if obj_mask_bool.shape != depth.shape:
+                obj_mask_bool = cv2.resize(
+                    obj_mask_bool.astype(np.uint8),
+                    (depth.shape[1], depth.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+            obj_depth_values = depth[obj_mask_bool]
+            finite_obj_depth_values = obj_depth_values[np.isfinite(obj_depth_values)]
+            obj_depth_mask_mean = float(np.mean(finite_obj_depth_values)) if finite_obj_depth_values.size > 0 else None
+            obj_center_xy = obj.get("center_xy")
+            obj_depth_center_value = None
+            if obj_center_xy is not None:
+                cx, cy = obj_center_xy
+                obj_depth_center_value = float(depth[cy, cx])
             object_key_rows.append(
                 build_mask_storage_entry(
                     npz_arrays=_npz_sink,
                     key_prefix=f"{frame_prefix}_obj_{obj_idx}_mask",
-                    mask=np.asarray(obj.get("mask"), dtype=np.uint8),
+                    mask=obj_mask,
                     base_entry={
                         "object_index": obj_idx,
                         "track_id": obj.get("track_id"),
@@ -926,8 +944,10 @@ def process_video(
                         "prompt": obj.get("prompt"),
                         "slug": obj.get("slug"),
                         "bbox_xyxy": obj.get("bbox_xyxy"),
-                        "center_xy": obj.get("center_xy"),
+                        "center_xy": obj_center_xy,
                         "mask_nonzero_pixels": int(obj.get("mask_nonzero_pixels") or 0),
+                        "depth_mask_mean": obj_depth_mask_mean,
+                        "depth_center_value": obj_depth_center_value,
                     },
                     storage_format=args.mask_storage_format,
                 )
