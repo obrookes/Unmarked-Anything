@@ -1,13 +1,32 @@
 #!/usr/bin/env python3
+"""Export per-object interval-sampled distances from camera-trap job outputs (JSON) to CSV.
+
+Distances are computed from `depth_mask_mean` averaged over a forward window at each
+sample point on a global time grid. All frame/second conversions use the video's native
+fps (`video_fps` from the JSON) since `frame_index` is a native frame index regardless of
+any `target_fps` subsampling used at inference time.
+
+Optional post-processing:
+- `--calibration PATH`: apply a per-camera linear calibration (see
+  `apps/camera_trap/calibration/fit.py`) to raw depth before window-averaging. The camera
+  is identified as `transect_cam`, extracted from the video name. Adds `transect_cam`,
+  `raw_distance`, and `calib_method` columns; `distance` becomes the calibrated value.
+- `--track-qc PATH`: drop tracks flagged `keep=False` in a track_qc.csv (columns
+  `video_name, track_id, n_checked, n_reject, reject_frac, issues, keep`), matched by
+  video name (extension-insensitive) and track id.
+- `--video-dir PATH`: override the directory searched for source videos (for ffprobe
+  creation_time lookups) in place of `assets/videos`, e.g. when paths moved on a cluster.
+"""
 from __future__ import annotations
 
 import argparse
 import csv
 import json
 import math
+import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +44,38 @@ CSV_COLUMNS = [
     "ind_no",
     "distance",
     "confidence",
+    "transect_cam",
+    "raw_distance",
+    "calib_method",
+    "detection_datetime",
 ]
+
+# Patterns to extract a normalised "<transect>_cam<NNN>" identifier from a video/filename.
+# Ported from wcf-pps-p3/notebooks/03_reconcile_annotations.ipynb (cell 9), with the second
+# pattern's spurious leading "-" dropped so 'T44-Cam_077' (no leading hyphen before the T)
+# matches as documented.
+TRANSECT_CAM_PATTERNS = [
+    r"(\w+)_Cam(\d+)",
+    r"T_?(\d+)-Cam_?(\d+)",
+    r"T(\d+)-\d+cam_?(\d+)",
+]
+
+
+def extract_transect_cam(filename: str) -> str | None:
+    """Extract and normalise a transect/cam identifier from a filename.
+
+    Normalises the cam number to a minimum of 3 digits. Tries, in order:
+    - '{transect}_Cam{number}'   e.g. '171_Cam0122'       -> '171_cam122'
+    - 'T{id}-Cam_{number}'       e.g. 'T44-Cam_077'        -> '44_cam077'
+    - 'T{id}-{id}cam_{number}'   e.g. 'T17-17cam_82'       -> '17_cam082'
+    """
+    for pattern in TRANSECT_CAM_PATTERNS:
+        match = re.search(pattern, filename, re.IGNORECASE)
+        if match:
+            transect = match.group(1).lstrip("T")
+            cam_normalised = match.group(2).lstrip("0").zfill(3)
+            return f"{transect}_cam{cam_normalised}"
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,6 +149,38 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="Exclude tracks whose confidence score is below this threshold (default: 0.5). Set 0.0 to disable.",
+    )
+    parser.add_argument(
+        "--calibration",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a calibration.json (see apps/camera_trap/calibration/fit.py) mapping "
+            "transect_cam to a per-camera linear depth calibration. When given, 'distance' "
+            "is the calibrated value and 'raw_distance'/'calib_method' are also emitted."
+        ),
+    )
+    parser.add_argument(
+        "--track-qc",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a track_qc.csv (columns: video_name, track_id, n_checked, n_reject, "
+            "reject_frac, issues, keep) identifying manually-reviewed tracks to drop "
+            "(keep == False)."
+        ),
+    )
+    parser.add_argument(
+        "--dropped-log",
+        type=Path,
+        default=None,
+        help="Optional CSV path to write dropped (video_name, track_id, reason) rows for --track-qc drops.",
+    )
+    parser.add_argument(
+        "--video-dir",
+        type=Path,
+        default=None,
+        help="Directory to search for source videos (for ffprobe creation_time) instead of assets/videos.",
     )
     args = parser.parse_args()
     if args.interval_seconds <= 0:
@@ -178,8 +260,8 @@ def ffprobe_creation_time(video_path: Path) -> datetime | None:
     return None
 
 
-def build_video_lookup(repo_root: Path) -> tuple[dict[str, Path], dict[str, Path]]:
-    videos_dir = repo_root / "assets" / "videos"
+def build_video_lookup(repo_root: Path, video_dir: Path | None = None) -> tuple[dict[str, Path], dict[str, Path]]:
+    videos_dir = video_dir if video_dir is not None else repo_root / "assets" / "videos"
     by_name: dict[str, Path] = {}
     by_stem: dict[str, Path] = {}
     if not videos_dir.is_dir():
@@ -237,6 +319,27 @@ def resolve_video_path(
     return None
 
 
+def normalize_video_name(name: str) -> str:
+    """Normalise a video name for matching against track_qc.csv, ignoring extension/case."""
+    return Path(str(name)).stem.lower()
+
+
+def load_track_qc(path: Path) -> dict[tuple[str, str], bool]:
+    """Load track_qc.csv into a {(normalized_video_name, track_id_str): keep} map."""
+    keep_map: dict[tuple[str, str], bool] = {}
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            video_name = row.get("video_name")
+            track_id = row.get("track_id")
+            if not video_name or track_id is None:
+                continue
+            keep_raw = str(row.get("keep", "")).strip().lower()
+            keep = keep_raw in ("true", "1", "yes")
+            keep_map[(normalize_video_name(video_name), str(track_id))] = keep
+    return keep_map
+
+
 def collect_track_samples(frames: list[dict[str, Any]]) -> dict[Any, dict[int, dict[str, Any]]]:
     track_samples: dict[Any, dict[int, dict[str, Any]]] = {}
     for frame in frames:
@@ -278,12 +381,22 @@ def build_rows_for_video(
     min_bbox_area_frac: float = 0.01,
     iou_dedup_threshold: float = 0.5,
     min_confidence: float = 0.5,
+    calibration: dict[str, Any] | None = None,
+    track_qc: dict[tuple[str, str], bool] | None = None,
+    dropped_log: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     video_name = str(video_json.get("video_name") or json_path.stem)
-    fps_value = float(video_json.get("target_fps") or video_json.get("video_fps") or 0.0)
+    # frame_index is a native video frame index regardless of any target_fps subsampling
+    # used at inference time, so all frame/second conversions must use video_fps.
+    fps_value = float(video_json.get("video_fps") or video_json.get("target_fps") or 0.0)
     if fps_value <= 0:
         return rows
+
+    transect_cam = extract_transect_cam(video_name)
+    apply_calibration = None
+    if calibration is not None:
+        from apps.camera_trap.calibration.fit import apply_calibration  # noqa: F401 (lazy import)
 
     frame_width = int(video_json.get("frame_width") or 0)
     frame_height = int(video_json.get("frame_height") or 0)
@@ -339,6 +452,20 @@ def build_rows_for_video(
                             iou_excluded.add(drop)
             excluded_tracks |= iou_excluded
 
+    # Step C: external manual track QC (runs regardless of apply_filters)
+    if track_qc:
+        norm_video_name = normalize_video_name(video_name)
+        for track_id in track_samples:
+            if track_id in excluded_tracks:
+                continue
+            keep = track_qc.get((norm_video_name, str(track_id)))
+            if keep is False:
+                excluded_tracks.add(track_id)
+                if dropped_log is not None:
+                    dropped_log.append(
+                        {"video_name": video_name, "track_id": track_id, "reason": "track_qc_reject"}
+                    )
+
     starting_date = ""
     year = month = day = hour = minute = ""
     if creation_dt is not None:
@@ -361,8 +488,10 @@ def build_rows_for_video(
 
         sampled_idx = math.ceil(first_idx / step_frames) * step_frames
         while sampled_idx <= last_idx:
+            window_raw_distances: list[float] = []
             window_distances: list[float] = []
             window_confidences: list[float] = []
+            calib_method = ""
             for frame_idx in range(sampled_idx, sampled_idx + window_frames):
                 if frame_idx not in present_indices:
                     continue
@@ -375,16 +504,26 @@ def build_rows_for_video(
                 if apply_filters and min_bbox_area_frac > 0.0 and frame_area > 0 and len(bbox) >= 4:
                     if (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) / frame_area < min_bbox_area_frac:
                         continue
-                # Depth: always skip missing or physically impossible values
+                # Depth: always skip missing or physically impossible values (checked on raw depth)
                 distance = entry.get("depth_mask_mean")
                 if distance is None or float(distance) < 0.0:
                     continue
-                window_distances.append(float(distance))
+                raw_val = float(distance)
+                window_raw_distances.append(raw_val)
+                if apply_calibration is not None:
+                    calibrated_val, calib_method = apply_calibration(raw_val, transect_cam, calibration)
+                    window_distances.append(calibrated_val)
+                else:
+                    window_distances.append(raw_val)
                 conf = entry.get("confidence")
                 if conf is not None:
                     window_confidences.append(float(conf))
 
             if window_distances:
+                second = round(sampled_idx / fps_value, 6)
+                detection_datetime = ""
+                if creation_dt is not None:
+                    detection_datetime = (creation_dt + timedelta(seconds=second)).isoformat()
                 rows.append(
                     {
                         "video_name": video_name,
@@ -394,10 +533,14 @@ def build_rows_for_video(
                         "day": day,
                         "hour": hour,
                         "minute": minute,
-                        "second": round(sampled_idx / fps_value, 6),
+                        "second": second,
                         "ind_no": track_id,
                         "distance": sum(window_distances) / len(window_distances),
                         "confidence": sum(window_confidences) / len(window_confidences) if window_confidences else "",
+                        "transect_cam": transect_cam or "",
+                        "raw_distance": sum(window_raw_distances) / len(window_raw_distances),
+                        "calib_method": calib_method,
+                        "detection_datetime": detection_datetime,
                     }
                 )
             sampled_idx += step_frames
@@ -421,20 +564,36 @@ def main() -> None:
             "Expected subdirectories each containing <subdir>/<subdir>.json."
         )
 
-    by_name, by_stem = build_video_lookup(REPO_ROOT)
+    by_name, by_stem = build_video_lookup(REPO_ROOT, video_dir=args.video_dir)
+
+    calibration: dict[str, Any] | None = None
+    if args.calibration is not None:
+        from apps.camera_trap.calibration.fit import load_calibration
+
+        calibration = load_calibration(args.calibration)
+
+    track_qc: dict[tuple[str, str], bool] | None = None
+    if args.track_qc is not None:
+        track_qc = load_track_qc(args.track_qc)
+
+    # Always collected (for the drop-count summary); only written to disk if --dropped-log is given.
+    dropped_log: list[dict[str, Any]] | None = [] if track_qc is not None else None
 
     all_rows: list[dict[str, Any]] = []
     skipped_missing_fps = 0
+    missing_creation_dt = 0
     for json_path in json_paths:
         video_json = json.loads(json_path.read_text(encoding="utf-8"))
 
-        fps_value = float(video_json.get("target_fps") or video_json.get("video_fps") or 0.0)
+        fps_value = float(video_json.get("video_fps") or video_json.get("target_fps") or 0.0)
         if fps_value <= 0:
             skipped_missing_fps += 1
             continue
 
         video_path = resolve_video_path(video_json=video_json, json_path=json_path, by_name=by_name, by_stem=by_stem)
         creation_dt = ffprobe_creation_time(video_path) if video_path is not None else None
+        if creation_dt is None:
+            missing_creation_dt += 1
 
         all_rows.extend(
             build_rows_for_video(
@@ -449,6 +608,9 @@ def main() -> None:
                 min_bbox_area_frac=args.min_bbox_area_frac,
                 iou_dedup_threshold=args.iou_dedup_threshold,
                 min_confidence=args.min_confidence,
+                calibration=calibration,
+                track_qc=track_qc,
+                dropped_log=dropped_log,
             )
         )
 
@@ -458,9 +620,21 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(all_rows)
 
+    if args.dropped_log is not None:
+        args.dropped_log.parent.mkdir(parents=True, exist_ok=True)
+        with args.dropped_log.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["video_name", "track_id", "reason"])
+            writer.writeheader()
+            writer.writerows(dropped_log or [])
+
     print(f"Wrote {len(all_rows)} rows to {args.output_csv}")
     if skipped_missing_fps:
         print(f"Skipped {skipped_missing_fps} videos because FPS was unavailable.")
+    if missing_creation_dt:
+        print(f"Warning: {missing_creation_dt} videos had no ffprobe creation_time; date/time columns left empty.")
+    if track_qc is not None:
+        dropped_tracks = len(dropped_log) if dropped_log is not None else "?"
+        print(f"track-qc: dropped {dropped_tracks} track(s) flagged keep=False.")
 
 
 if __name__ == "__main__":
