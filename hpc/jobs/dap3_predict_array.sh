@@ -62,6 +62,8 @@ IFS=$'\t' read -r -a F <<< "$LINE"
 # 15 sam3_track_isolation (optional: recreate|reset|both)
 # 16 sam3_track_tail_policy (optional: warn_and_finalize|fail_fast)
 # 17 write_npz (optional: 0|1, default 0 — set to 1 to write *_arrays.npz)
+# 18 sam3_backend (optional: official|ultralytics, default official)
+# 19 sam3_det_threshold (optional: float, default 0.5; official backend only)
 INPUT_VIDEO_DIR="${F[0]:-}"
 SAM3_MODEL_PATH="${F[1]:-}"
 SAM3_TEXT_PROMPTS="${F[2]:-}"
@@ -79,6 +81,8 @@ DA3_BATCH_SIZE="${F[13]:-}"
 SAM3_TRACK_ISOLATION="${F[14]:-recreate}"
 SAM3_TRACK_TAIL_POLICY="${F[15]:-warn_and_finalize}"
 WRITE_NPZ="${WRITE_NPZ:-${F[16]:-0}}"
+SAM3_BACKEND="${SAM3_BACKEND:-${F[17]:-official}}"
+SAM3_DET_THRESHOLD="${SAM3_DET_THRESHOLD:-${F[18]:-0.5}}"
 
 if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" || -z "$SAM3_TEXT_PROMPTS" || -z "$DA3_BATCH_SIZE" ]]; then
   echo "Invalid manifest line (missing required fields): $LINE" >&2
@@ -110,6 +114,14 @@ case "$SAM3_TRACK_TAIL_POLICY" in
   *)
     echo "Invalid sam3_track_tail_policy '$SAM3_TRACK_TAIL_POLICY' in manifest line: $LINE" >&2
     echo "sam3_track_tail_policy must be one of: warn_and_finalize, fail_fast." >&2
+    exit 1
+    ;;
+esac
+case "$SAM3_BACKEND" in
+  official|ultralytics) ;;
+  *)
+    echo "Invalid sam3_backend '$SAM3_BACKEND' in manifest line: $LINE" >&2
+    echo "sam3_backend must be one of: official, ultralytics." >&2
     exit 1
     ;;
 esac
@@ -159,11 +171,23 @@ JOB_TAG="${JOB_TAG:0:80}"
 
 cd "$REPO_ROOT"
 
+# Container/env selection. The official SAM3 backend needs envs/containers/dap3-sam3.def's
+# newer Python/torch (see that file for why); the ultralytics backend keeps working with the
+# existing conda env. Either CONTAINER (an apptainer .sif) or CONDA_ENV may be set explicitly;
+# if neither is set, default by backend (mirrors hpc/jobs/read_boards.sh's
+# CONTAINER/CONDA_ENV convention).
+CONTAINER="${CONTAINER:-}"
+CONDA_ENV="${CONDA_ENV:-}"
+if [[ -z "$CONTAINER" && -z "$CONDA_ENV" ]]; then
+  if [[ "$SAM3_BACKEND" == "official" ]]; then
+    CONTAINER="${DAP3_SAM3_CONTAINER:-$REPO_ROOT/envs/containers/dap3-sam3.sif}"
+  else
+    CONDA_ENV="dap3-stream"
+  fi
+fi
+
 module purge
 module load cuda/12.6
-
-source "$HOME/miniforge3/bin/activate"
-conda activate dap3-stream
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
@@ -190,6 +214,8 @@ CMD=(
   --sam3-mode "$SAM3_MODE"
   --conf "$CONF"
   --device "$DEVICE"
+  --sam3-backend "$SAM3_BACKEND"
+  --sam3-det-threshold "$SAM3_DET_THRESHOLD"
 )
 if [[ "$DA3_MODE" == "stream" ]]; then
   CMD+=(--da3-stream-config "$DA3_STREAM_CONFIG")
@@ -217,9 +243,23 @@ echo "SLURM_JOB_ID: ${SLURM_JOB_ID} | SLURM_ARRAY_TASK_ID: ${SLURM_ARRAY_TASK_ID
 echo "Manifest: $MANIFEST"
 echo "Selected line: $LINE"
 echo "Auto job tag: $JOB_TAG"
+echo "SAM3 backend: $SAM3_BACKEND (det-threshold $SAM3_DET_THRESHOLD)"
 echo "Command: ${CMD[*]}"
 
-"${CMD[@]}"
+if [[ -n "$CONTAINER" ]]; then
+  echo "Container: $CONTAINER"
+  apptainer exec --nv \
+    --env "PYTHONPATH=$REPO_ROOT:$REPO_ROOT/src" \
+    "$CONTAINER" "${CMD[@]}"
+elif [[ -n "$CONDA_ENV" ]]; then
+  echo "Conda env: $CONDA_ENV"
+  source "$HOME/miniforge3/bin/activate"
+  conda activate "$CONDA_ENV"
+  "${CMD[@]}"
+else
+  echo "Set CONTAINER (an apptainer .sif) or CONDA_ENV before submitting." >&2
+  exit 1
+fi
 
 if [[ "$WORK_OUTPUT_DIR" != "$FINAL_OUTPUT_DIR" ]]; then
   mkdir -p "$FINAL_OUTPUT_DIR"

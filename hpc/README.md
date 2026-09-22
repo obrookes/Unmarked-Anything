@@ -8,9 +8,17 @@ This directory contains cluster-oriented job scripts and helpers for running `da
   - `dap3_predict_ape.sh`: single-job template with sensible defaults.
   - `dap3_predict_array.sh`: array-job script driven by a TSV manifest.
   - `dap3_export_overlays_array.sh`: dependent export job for headless overlay video generation.
+  - `read_boards.sh`: calibration-board VLM reading (+ optional `fit.py` fit) for reference videos.
+  - `mask_verify_array.sh`: sharded mask-QC VLM array job.
+  - `export_distances.sh`: CPU job wrapping `export_job_distances_csv.py`.
+  - `ctds_abundance.sh`: CPU job wrapping `build_ctds_inputs.py` + `ctds_abundance.R`.
 - `configs/`: job configuration inputs.
   - `job_manifest.tsv`: one array task per non-comment row.
+  - `pipeline.env.example`: template for `run_full_pipeline.sh`'s shared config.
 - `scripts/`: helper utilities for submit/monitor/result collection.
+  - `run_full_pipeline.sh`: submits the full PSS P3 pipeline (calibration + main run + QC +
+    export + abundance) as dependency-chained SLURM jobs. See "PSS P3 end-to-end pipeline"
+    in the top-level `README.md` for stage-by-stage details and usage.
 - `logs/slurm/`: SLURM `.out/.err` logs (`%x-%j` and `%x-%A_%a`).
 - `runs/`: per-job output folders.
 
@@ -71,6 +79,8 @@ OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
 15. `sam3_track_isolation` (optional: `recreate`, `reset`, `both`; default `recreate`)
 16. `sam3_track_tail_policy` (optional: `warn_and_finalize`, `fail_fast`; default `warn_and_finalize`)
 17. `write_npz` (optional: `0`/`1`; default `0` — set to `1` to write `*_arrays.npz` alongside the JSON)
+18. `sam3_backend` (optional: `official`/`ultralytics`; default `official`)
+19. `sam3_det_threshold` (optional: float; default `0.5`; only used by the `official` backend)
 
 Notes:
 - Comment lines start with `#`.
@@ -82,9 +92,14 @@ Notes:
 - `da3_batch_size` is passed through directly to the CLI and must be a positive integer.
 - `da3_mode=stream` runs in-memory DA3-Streaming on all sampled frames and requires a valid `da3_stream_config`.
 - `da3_mode=all_frames` runs standard DA3 on all sampled frames in memory; output persistence remains SAM-positive (`processed`) frames.
-- By default only the JSON output is written. Set `write_npz=1` in the manifest (or pass `--npz` directly) to also write `*_arrays.npz`. The NPZ is required by downstream tools such as `export_job_distances_csv.py`, `validate_mask_rle_roundtrip.py`, and the overlay export workflow.
+- By default only the JSON output is written. Set `write_npz=1` in the manifest (or pass `--npz` directly) to also write `*_arrays.npz`. The NPZ is required by downstream tools such as `mask_verify.py` (mask QC), `read_boards.py` (calibration board reading), `validate_mask_rle_roundtrip.py`, and the overlay export workflow. It is NOT needed by `export_job_distances_csv.py`, which reads the per-video JSON only.
 - Mask persistence defaults to RLE-only. Use `--mask-storage-format both` only for validation runs where you need paired raw+RLE artifacts.
 - `sam3_track_isolation` and `sam3_track_tail_policy` are only relevant when `sam3_mode=track`.
+- `sam3_backend`/`sam3_det_threshold` are trailing columns; manifests written before they existed
+  still parse (they default to `official`/`0.5`). The `official` backend needs
+  `envs/containers/dap3-sam3.def` (see "Containers" below) — set `DAP3_SAM3_CONTAINER` to the
+  built `.sif` path, or override `CONTAINER`/`CONDA_ENV` directly at submit time. `ultralytics`
+  keeps using the `dap3-stream` conda env by default.
 
 ### 2) Submit array
 
@@ -123,6 +138,37 @@ hpc/scripts/submit_array_with_export.sh hpc/jobs/dap3_predict_array.sh hpc/confi
 ```
 
 Current status: these new automation scripts are not yet tested on Isambard and need to be ported/validated there.
+
+## Containers
+
+Two Apptainer definitions live in `envs/containers/`:
+
+- `depth-anything-3.def`: CUDA 12.8 devel + system Python 3.10 + torch 2.6.0. Supports
+  `--sam3-backend ultralytics` only — the official `facebookresearch/sam3` package requires
+  Python>=3.12/torch>=2.7, which this image is below.
+- `dap3-sam3.def`: NGC `nvcr.io/nvidia/pytorch:25.06-py3` base (Python 3.12, torch 2.7.x), built the
+  same way as `vision-llm-ann-generator/container/sam3.def`. Installs the official `sam3` package,
+  `pycocotools`, DA3's actual CLI-path dependencies (not `gsplat`/`pycolmap`, which nothing on the
+  camera-trap CLI path imports — see the def file's comments), `opencv-python-headless`, and
+  `ultralytics` (so it can also run the `ultralytics` backend for comparison). This backs
+  `--sam3-backend official`.
+
+Build **inside a job, not on the login node** — the login node's build cgroup kills the sam3 pip
+install partway through (see `vision-llm-ann-generator/container/README.md` for the underlying
+issue and the sandbox/tarball workaround, which `dap3-sam3.def`'s `%help` block also documents):
+
+```bash
+export APPTAINER_CACHEDIR=$SCRATCH/apptainer-cache
+export APPTAINER_TMPDIR=$SCRATCH/apptainer-cache/tmp
+mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
+# from a compute-node job (salloc/sbatch), not the login node:
+apptainer build --sandbox "$SCRATCH/containers/dap3-sam3-sandbox" envs/containers/dap3-sam3.def
+apptainer build "$SCRATCH/containers/dap3-sam3.sif" "$SCRATCH/containers/dap3-sam3-sandbox"
+```
+
+`dap3_predict_array.sh` does not bake the repo into the image; it bind-mounts the repo and runs
+`python dap3_cli.py ...` with `PYTHONPATH=$REPO_ROOT:$REPO_ROOT/src` set inside the container. Point
+`DAP3_SAM3_CONTAINER` (or `CONTAINER`) at the built `.sif` when submitting `official`-backend jobs.
 
 ## Helper Scripts
 

@@ -1,3 +1,36 @@
+# Project Status — 2026-09-22
+
+Branch `feat/sam3-calib-ctds` (off `dev`) adds the full PSS P3 calibration/CTDS pipeline:
+
+- Pluggable SAM3 backends (`--sam3-backend official|ultralytics`, default `official`) using the
+  official `facebookresearch/sam3` package alongside the existing ultralytics port.
+- Per-camera linear depth calibration (VLM distance-board reading from reference videos +
+  `calibration/fit.py`) and mask-QC (VLM track review, `qc/mask_verify.py`) feeding
+  `export_job_distances_csv.py`.
+- In-pipeline CTDS density/abundance estimation (`abundance/build_ctds_inputs.py` +
+  `abundance/ctds_abundance.R`, porting `wcf-pps-p3/scripts/PSS_P3_Chimp_CTDS_all.R`).
+- `envs/containers/dap3-sam3.def`: a new Apptainer image (NGC PyTorch 25.06 base, Python 3.12/
+  torch 2.7.x) for the official SAM3 backend, whose Python/torch floor
+  `envs/containers/depth-anything-3.def` (python3.10/torch 2.6.0) cannot satisfy; that def's sam3
+  install was reverted accordingly (comment points at the new file).
+- `hpc/configs/job_manifest.tsv` / `hpc/jobs/dap3_predict_array.sh` gained `sam3_backend` /
+  `sam3_det_threshold` manifest columns (default `official`/`0.5`, backward compatible) and
+  container/conda-env selection for the official backend.
+- `hpc/scripts/run_full_pipeline.sh`: one entry point that submits the whole six-stage chain
+  (reference dap3 → calibration → main dap3 → mask QC → export → abundance) as
+  dependency-chained (`sbatch --dependency=afterok:`) jobs, with per-stage `SKIP_*` flags and a
+  `DRY_RUN=1` mode. Shared config lives in `hpc/configs/pipeline.env.example`. New CPU job
+  scripts: `hpc/jobs/export_distances.sh`, `hpc/jobs/ctds_abundance.sh`.
+- Fixed a stale doc note: `export_job_distances_csv.py` is JSON-only and does not need `--npz`
+  output (NPZ is needed by mask QC / calibration board reading instead).
+- Not verified on the cluster (compute nodes were offline for this branch): the `dap3-sam3.def`
+  container build, `--sam3-backend official` end-to-end, and the live `run_full_pipeline.sh`
+  submission (dry-run only, locally).
+
+Earlier snapshot below.
+
+---
+
 # Project Status — 2026-07-02
 
 Consolidation snapshot: all active development work has been merged onto the

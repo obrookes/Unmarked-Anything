@@ -42,21 +42,11 @@ From: nvidia/cuda:12.8.0-devel-ubuntu22.04
         ultralytics \
         jaxtyping
 
-    # Official facebookresearch/sam3 (SA-FARI fine-tuned checkpoints; --sam3-backend official).
-    # Pin the already-installed torch/torchvision as a pip constraint so sam3's dependency
-    # resolution cannot silently replace them with different wheels (mirrors
-    # vision-llm-ann-generator/container/sam3.def). NOTE: sam3's stated floor is
-    # Python>=3.12 / torch>=2.7 / CUDA>=12.6; this image's python3.10 + torch==2.6.0 are below
-    # that floor, so sam3 import may fail here until the base image / pinned torch version are
-    # bumped to match (see vision-llm-ann-generator/container/sam3.def, which uses
-    # nvcr.io/nvidia/pytorch:25.06-py3 for exactly this reason). --sam3-backend ultralytics
-    # remains the default-safe choice on this image; validate --sam3-backend official inside the
-    # built container before relying on it.
-    python3 -c 'import torch, torchvision; print(f"torch=={torch.__version__}\ntorchvision=={torchvision.__version__}")' > /tmp/constraints.txt
-    cat /tmp/constraints.txt
-    PIP_CONSTRAINT=/tmp/constraints.txt python3 -m pip install --no-cache-dir \
-        "git+https://github.com/facebookresearch/sam3.git" \
-        pycocotools
+    # Official facebookresearch/sam3 is NOT installed on this image: its stated floor is
+    # Python>=3.12 / torch>=2.7, below this image's python3.10 + torch==2.6.0, so the pip install
+    # would fail outright. Use envs/containers/dap3-sam3.def for `--sam3-backend official`; this
+    # image supports `--sam3-backend ultralytics` only.
+    python3 -m pip install --no-cache-dir pycocotools
 
     # Clone and install Unmarked-Anything in editable mode
     mkdir -p /content
@@ -82,12 +72,13 @@ From: nvidia/cuda:12.8.0-devel-ubuntu22.04
     PyTorch         2.6.0
     xformers        0.0.29.post3
     Base_Image      nvidia/cuda:12.8.0-devel-ubuntu22.04
-    Description     Unmarked-Anything + Ultralytics/official SAM3 with CUDA 12.8 support
+    Description     Unmarked-Anything + Ultralytics SAM3 with CUDA 12.8 support
 
 %help
-    Unmarked-Anything container with CUDA 12.8, PyTorch 2.6.0, xformers, gsplat,
-    Ultralytics SAM3, and the official facebookresearch/sam3 package (see the sam3
-    install step in %post for a note on its Python/torch version floor).
+    Unmarked-Anything container with CUDA 12.8, PyTorch 2.6.0, xformers, gsplat, and
+    Ultralytics SAM3 (`--sam3-backend ultralytics`). For `--sam3-backend official`
+    (facebookresearch/sam3, requires Python>=3.12/torch>=2.7), use
+    envs/containers/dap3-sam3.def instead.
 
     Build:
         singularity build depth-anything-3.sif depth-anything-3.def

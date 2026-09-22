@@ -181,6 +181,58 @@ Depth-analysis helpers are documented separately in [`apps/camera_trap/scripts/R
 
 - For SLURM/HPC job structure, batch scripts, manifests, and helper utilities, see: [`hpc/README.md`](./hpc/README.md)
 
+## PSS P3 end-to-end pipeline
+
+The PSS P3 chimpanzee camera-trap distance-sampling analysis chains six stages, all runnable on
+Isambard AI as SLURM jobs:
+
+1. **Reference-video dap3 run** — `dap3_cli.py` on the calibration reference videos with prompt
+   `"person holding sign"` and `--npz` (NPZ is needed here for calibration board reading).
+2. **Calibration** — `apps/camera_trap/calibration/read_boards.py` (VLM reads distance-board
+   numbers from the reference run's masks) → `apps/camera_trap/calibration/fit.py` → a per-camera
+   linear depth `calibration.json`.
+3. **Main dap3 run** — `dap3_cli.py` on the actual chimp videos with `--npz` (NPZ is needed for
+   mask QC, not for the exporter). Uses the *same* `--da3-model-id`/`--da3-mode`/`--da3-batch-size`/
+   `--target-fps` as the reference run — required for the calibration to be valid. Runs in
+   parallel with stages 1–2.
+4. **Mask QC** — `apps/camera_trap/qc/mask_verify.py` (VLM), sharded, on the main run's output →
+   `track_qc.csv`.
+5. **Export** — `apps/camera_trap/scripts/export_job_distances_csv.py --calibration
+   calibration.json --track-qc track_qc.csv` → a per-detection distances CSV. This step is
+   **JSON-only**; it does not read the NPZ arrays (older notes in this repo suggesting otherwise
+   are stale — NPZ is only needed by stages 1/3 for downstream calibration/QC, not by the
+   exporter).
+6. **Abundance** — `apps/camera_trap/abundance/build_ctds_inputs.py` (builds `Distance`-package
+   flatfile + activity inputs) → `apps/camera_trap/abundance/ctds_abundance.R` (fits the
+   detection function + activity model, produces density/abundance estimates).
+
+### Running it
+
+```bash
+cp hpc/configs/pipeline.env.example hpc/configs/my_pipeline.env
+# edit my_pipeline.env: REPO_ROOT, VIDEO_DIR, REF_VIDEO_DIR, REFERENCE_ROOT, OUT_ROOT, SAM3_CKPT,
+# container/env paths, VLM model, Slurm partition/account, etc.
+
+# see the sbatch commands without submitting anything:
+DRY_RUN=1 PIPELINE_ENV=hpc/configs/my_pipeline.env hpc/scripts/run_full_pipeline.sh
+
+# submit the full chain (dependency-chained sbatch jobs, prints job ids):
+PIPELINE_ENV=hpc/configs/my_pipeline.env hpc/scripts/run_full_pipeline.sh
+```
+
+Each stage's underlying CLI resumes/skips existing outputs by default, so re-running the script
+after a partial failure is safe. Individual stages can be skipped with `SKIP_REF=1`, `SKIP_CALIB=1`,
+`SKIP_MAIN=1`, `SKIP_QC=1`, `SKIP_EXPORT=1`, `SKIP_ABUNDANCE=1` — when skipping a stage whose output
+a later stage needs, point the pipeline at the existing output via `REF_JOB_DIR`, `MAIN_JOB_DIR`,
+`CALIBRATION_JSON`, `TRACK_QC_CSV`, or `DISTANCES_CSV`. See `hpc/scripts/run_full_pipeline.sh` and
+`hpc/configs/pipeline.env.example` for the full variable list, and `hpc/README.md` for job-script
+and container details (including the new `envs/containers/dap3-sam3.def`, needed for
+`--sam3-backend official`).
+
+Outputs land under `OUT_ROOT`: `reference/`, `main/` (dap3 runs), `calibration/calibration.json`,
+`main/qc/track_qc.csv`, `distances.csv`, and `abundance/` (CTDS flatfile, activity inputs, and
+`abundance_estimates.csv`).
+
 ## Full Command Template
 
 ```bash

@@ -1,0 +1,112 @@
+Bootstrap: docker
+# nvcr.io/nvidia/pytorch:25.06-py3: NGC's PyTorch container publishes multi-arch (amd64+arm64)
+# manifests since the 24.xx series, so this pulls natively on the GH200 (aarch64) login node with
+# no QEMU/emulation needed. The 25.06 tag ships Python 3.12 and PyTorch 2.7.x built against CUDA
+# 12.9, which satisfies the official facebookresearch/sam3 package's stated floor
+# (Python >= 3.12, torch >= 2.7, CUDA >= 12.6). envs/containers/depth-anything-3.def uses
+# nvidia/cuda:12.8.0-devel-ubuntu22.04 + system python3.10 + torch==2.6.0, which is BELOW that
+# floor -- this image exists so `--sam3-backend official` has somewhere it actually works.
+# Approach mirrors vision-llm-ann-generator/container/sam3.def (see that repo's container/README.md
+# for the login-node build-cgroup workarounds referenced in %help below).
+From: nvcr.io/nvidia/pytorch:25.06-py3
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+
+    python3 -m pip install --no-cache-dir --upgrade pip
+
+    # Pin the NGC-built torch/torchvision so sam3's and DA3's dependency resolution cannot
+    # silently replace them with PyPI wheels (which would drop the GH200-tuned CUDA build).
+    python3 -c 'import torch, torchvision; print(f"torch=={torch.__version__}\ntorchvision=={torchvision.__version__}")' > /tmp/constraints.txt
+    cat /tmp/constraints.txt
+
+    # Official SAM3 (facebookresearch repo, not the ultralytics fork) -- exactly as
+    # vision-llm-ann-generator/container/sam3.def installs it.
+    PIP_CONSTRAINT=/tmp/constraints.txt python3 -m pip install --no-cache-dir \
+        "git+https://github.com/facebookresearch/sam3.git" \
+        pycocotools \
+        opencv-python-headless
+
+    # DA3 + camera-trap CLI dependencies actually imported on the dap3_cli.py path (checked
+    # against src/depth_anything_3/api.py and its model/, utils/ imports, plus
+    # apps/camera_trap/cli/dap3_cli.py). Deliberately NOT installed:
+    #   - gsplat: only imported by src/depth_anything_3/model/utils/gs_renderer.py (3DGS
+    #     rendering export), which the camera-trap CLI never calls.
+    #   - pycolmap: only imported by src/depth_anything_3/utils/export/colmap.py (COLMAP export),
+    #     also unused on the CLI path. requirements.txt lists it but nothing on this path imports
+    #     it eagerly.
+    #   - xformers: src/depth_anything_3/model/dinov2/layers/swiglu_ffn.py does
+    #     `try: from xformers.ops import SwiGLU / except ImportError: SwiGLU = SwiGLUFFN`, i.e. it
+    #     is an optional fast-path, not a hard dependency. xformers wheels are also usually built
+    #     against a specific torch/CUDA/arch combo and installing a mismatched one risks breaking
+    #     the pinned NGC torch; skipped here. Add it later (matching this image's torch/CUDA
+    #     build) if the SwiGLU fast path is needed for performance.
+    PIP_CONSTRAINT=/tmp/constraints.txt python3 -m pip install --no-cache-dir \
+        trimesh \
+        einops \
+        huggingface_hub \
+        imageio \
+        "numpy<2" \
+        opencv-python-headless \
+        open3d \
+        fastapi \
+        uvicorn \
+        requests \
+        typer \
+        pillow \
+        omegaconf \
+        evo \
+        e3nn \
+        "moviepy==1.0.3" \
+        plyfile \
+        pillow_heif \
+        safetensors \
+        pycocotools \
+        ultralytics
+
+    # Unmarked-Anything itself is bind-mounted at runtime (see hpc/jobs/*.sh, which cd into
+    # REPO_ROOT and invoke `python dap3_cli.py ...` directly) rather than pip-installed into the
+    # image, so PYTHONPATH -- not `pip install -e` -- puts src/ on the import path. Set
+    # PYTHONPATH=$REPO_ROOT:$REPO_ROOT/src when running this container.
+
+%environment
+    export HF_HUB_OFFLINE=1
+    export PYTHONUNBUFFERED=1
+
+%runscript
+    exec python3 "$@"
+
+%labels
+    Author          dl18206
+    Base_Image      nvcr.io/nvidia/pytorch:25.06-py3
+    Description     DA3 + official facebookresearch/sam3 for the camera-trap CLI (dap3_cli.py)
+
+%help
+    Container for `dap3_cli.py --sam3-backend official`: DA3 depth + the official
+    facebookresearch/sam3 predictor, on an NGC PyTorch base new enough to satisfy sam3's
+    Python>=3.12 / torch>=2.7 floor (unlike envs/containers/depth-anything-3.def).
+
+    Build INSIDE A JOB, not on the login node -- the login node's build cgroup (commonly ~4 GiB
+    RAM / 500 pids on Isambard AI) kills the sam3 pip install partway through. Build as a sandbox
+    first, then convert to a SIF on a compute node, following
+    vision-llm-ann-generator/container/README.md's "Normal path":
+
+        export APPTAINER_CACHEDIR=$SCRATCH/apptainer-cache
+        export APPTAINER_TMPDIR=$SCRATCH/apptainer-cache/tmp
+        mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
+        # from a compute-node job (salloc/sbatch), not the login node:
+        apptainer build --sandbox "$SCRATCH/containers/dap3-sam3-sandbox" \
+            envs/containers/dap3-sam3.def
+        apptainer build "$SCRATCH/containers/dap3-sam3.sif" "$SCRATCH/containers/dap3-sam3-sandbox"
+
+    If the sandbox build itself is OOM/pid-killed even inside a job, see
+    vision-llm-ann-generator/container/README.md's "login-node cgroup kills the pip install"
+    fallback (bare base-image sandbox + a venv on $SCRATCH with --system-site-packages).
+
+    Run (repo bind-mounted, not baked in -- see hpc/jobs/dap3_predict_array.sh for the exact
+    invocation this backs):
+
+        apptainer exec --nv \
+            --env PYTHONPATH=$REPO_ROOT:$REPO_ROOT/src \
+            "$SCRATCH/containers/dap3-sam3.sif" \
+            python3 "$REPO_ROOT/dap3_cli.py" --sam3-backend official ...
