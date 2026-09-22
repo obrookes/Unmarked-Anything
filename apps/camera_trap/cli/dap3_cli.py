@@ -24,6 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_PATH = REPO_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from depth_anything_3.api import DepthAnything3
 from depth_anything_3.utils.camera_trap_masks import (
@@ -33,16 +35,24 @@ from depth_anything_3.utils.camera_trap_masks import (
     encode_mask_to_rle_npz_payload,
     normalize_binary_mask,
 )
-from ultralytics.models.sam import SAM3SemanticPredictor
-try:
-    from ultralytics.models.sam import SAM3VideoSemanticPredictor
-except ImportError:
-    SAM3VideoSemanticPredictor = None
+from apps.camera_trap import sam3_backends
+from apps.camera_trap.sam3_backends import (
+    TRACK_ISOLATION_CHOICES,
+    TRACK_TAIL_POLICY_CHOICES,
+    OfficialSam3Backend,
+    UltralyticsBackend,
+    create_sam3_track_predictor,
+    extract_prompt_masks_and_objects,
+    extract_track_summary,
+    handle_track_stream_index_error,
+    prepare_sam3_track_predictor_for_video,
+    reset_sam3_track_predictor_state,
+    validate_track_state_num_frames,
+)
 
 
 DEFAULT_VIDEO_EXTS = ".mp4,.mov,.avi,.mkv"
-TRACK_ISOLATION_CHOICES = ("recreate", "reset", "both")
-TRACK_TAIL_POLICY_CHOICES = ("warn_and_finalize", "fail_fast")
+SAM3_BACKEND_CHOICES = ("official", "ultralytics")
 DA3_MODE_CHOICES = ("batch", "stream", "all_frames")
 
 
@@ -107,6 +117,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="SAM3 inference mode: native video tracking ('track') or per-frame segmentation ('frame').",
     )
     parser.add_argument("--conf", type=float, default=0.25, help="SAM3 confidence threshold.")
+    parser.add_argument(
+        "--sam3-backend",
+        choices=SAM3_BACKEND_CHOICES,
+        default="official",
+        help=(
+            "SAM3 backend: 'official' uses the facebookresearch/sam3 package (SA-FARI "
+            "checkpoints; --sam3-mode track only), 'ultralytics' uses the ultralytics SAM3 "
+            "port (track or frame)."
+        ),
+    )
+    parser.add_argument(
+        "--sam3-det-threshold",
+        type=float,
+        default=0.5,
+        help=(
+            "Detection/presence score threshold passed to the official SAM3 backend's "
+            "propagate_in_video call. Ignored by --sam3-backend ultralytics, which uses --conf."
+        ),
+    )
     parser.add_argument(
         "--device",
         default="auto",
@@ -183,6 +212,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--max-videos must be > 0 when provided.")
     if args.da3_batch_size <= 0:
         parser.error("--da3-batch-size must be > 0.")
+    if args.sam3_backend == "official" and args.sam3_mode == "frame":
+        parser.error("--sam3-backend official currently supports --sam3-mode track only.")
     return args
 
 
@@ -250,174 +281,6 @@ def discover_videos(input_dir: Path, video_exts: tuple[str, ...]) -> list[Path]:
     videos = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in video_exts]
     videos.sort(key=lambda p: p.name.lower())
     return videos
-
-
-def create_sam3_track_predictor(sam3_overrides: dict[str, Any]) -> Any:
-    if SAM3VideoSemanticPredictor is None:
-        raise ImportError(
-            "SAM3VideoSemanticPredictor is not available in this ultralytics build. "
-            "Upgrade ultralytics or run with --sam3-mode frame."
-        )
-    return SAM3VideoSemanticPredictor(overrides=sam3_overrides)
-
-
-def reset_sam3_track_predictor_state(sam3_track: Any) -> list[str]:
-    actions: list[str] = []
-    if sam3_track is None:
-        return actions
-
-    # Do not call reset_prompts() in reset mode.
-    # Some ultralytics builds expect prompt-side model internals (for example language feature caches)
-    # to persist across calls after model setup; clearing them here can cause KeyError on next video.
-    if callable(getattr(sam3_track, "reset_prompts", None)):
-        actions.append("reset_prompts_skipped")
-
-    reset_image = getattr(sam3_track, "reset_image", None)
-    if callable(reset_image):
-        reset_image()
-        actions.append("reset_image")
-
-    if hasattr(sam3_track, "inference_state"):
-        inference_state = getattr(sam3_track, "inference_state")
-        if isinstance(inference_state, dict):
-            inference_state.clear()
-            actions.append("inference_state.clear")
-        else:
-            setattr(sam3_track, "inference_state", {})
-            actions.append("inference_state={}")
-    else:
-        setattr(sam3_track, "inference_state", {})
-        actions.append("inference_state={}")
-
-    for attr_name in ("dataset", "batch", "results"):
-        if hasattr(sam3_track, attr_name):
-            setattr(sam3_track, attr_name, None)
-            actions.append(f"{attr_name}=None")
-    if hasattr(sam3_track, "seen"):
-        setattr(sam3_track, "seen", 0)
-        actions.append("seen=0")
-
-    tracker = getattr(sam3_track, "tracker", None)
-    if tracker is None:
-        return actions
-
-    tracker_reset_image = getattr(tracker, "reset_image", None)
-    if callable(tracker_reset_image):
-        tracker_reset_image()
-        actions.append("tracker.reset_image")
-
-    if hasattr(tracker, "inference_state"):
-        tracker_inference_state = getattr(tracker, "inference_state")
-        if isinstance(tracker_inference_state, dict):
-            tracker_inference_state.clear()
-            actions.append("tracker.inference_state.clear")
-        else:
-            setattr(tracker, "inference_state", {})
-            actions.append("tracker.inference_state={}")
-
-    return actions
-
-
-def prepare_sam3_track_predictor_for_video(
-    *,
-    sam3_track: Any,
-    isolation_mode: str,
-    sam3_overrides: dict[str, Any],
-) -> tuple[Any, list[str]]:
-    actions: list[str] = []
-    if isolation_mode not in TRACK_ISOLATION_CHOICES:
-        raise ValueError(
-            f"Unknown --sam3-track-isolation '{isolation_mode}'. "
-            f"Expected one of: {', '.join(TRACK_ISOLATION_CHOICES)}."
-        )
-
-    if isolation_mode == "recreate":
-        return create_sam3_track_predictor(sam3_overrides), ["recreate"]
-
-    if isolation_mode == "reset":
-        if sam3_track is None:
-            sam3_track = create_sam3_track_predictor(sam3_overrides)
-            actions.append("create")
-        reset_actions = reset_sam3_track_predictor_state(sam3_track)
-        actions.append("reset")
-        actions.extend([f"reset:{name}" for name in reset_actions])
-        return sam3_track, actions
-
-    # isolation_mode == "both"
-    if sam3_track is not None:
-        reset_actions = reset_sam3_track_predictor_state(sam3_track)
-        actions.append("reset_previous")
-        actions.extend([f"reset:{name}" for name in reset_actions])
-    sam3_track = create_sam3_track_predictor(sam3_overrides)
-    actions.append("recreate")
-    return sam3_track, actions
-
-
-def validate_track_state_num_frames(
-    *,
-    sam3_track: Any,
-    video_stem: str,
-    expected_total_frames: int | None,
-    expected_sampled_frames: int | None,
-    sample_interval: int,
-) -> int | None:
-    inference_state = getattr(sam3_track, "inference_state", None)
-    num_frames = (
-        int(inference_state.get("num_frames"))
-        if isinstance(inference_state, dict) and inference_state.get("num_frames") is not None
-        else None
-    )
-    # SAM3VideoSemanticPredictor tracks full video length (`dataset.frames`), not sampled frame count.
-    # Validate against total input frames and keep sampled-frame info for diagnostics only.
-    if (
-        expected_total_frames is not None
-        and num_frames is not None
-        and abs(num_frames - expected_total_frames) > 1
-    ):
-        raise RuntimeError(
-            "SAM3 track predictor state mismatch for video "
-            f"'{video_stem}': inference_state.num_frames={num_frames}, "
-            f"expected_total_frames={expected_total_frames}, "
-            f"expected_sampled_frames={expected_sampled_frames}, sample_interval={sample_interval}. "
-            "This usually indicates cross-video state leakage."
-        )
-    return num_frames
-
-
-def handle_track_stream_index_error(
-    *,
-    exc: Exception,
-    video_stem: str,
-    sampled_idx: int,
-    dataset_frame: Any,
-    sample_interval: int,
-    isolation_mode: str,
-    tail_policy: str,
-    warnings: list[str],
-) -> bool:
-    context = (
-        f"video={video_stem} sampled_idx={sampled_idx} dataset_frame={dataset_frame} "
-        f"sample_interval={sample_interval} isolation={isolation_mode}"
-    )
-    if tail_policy == "warn_and_finalize":
-        warning = (
-            "SAM3 track stream ended with IndexError; finalizing partial results "
-            f"({context}): {type(exc).__name__}: {exc}"
-        )
-        warnings.append(warning)
-        print(f"Warning [{video_stem}]: {warning}")
-        return True
-
-    if tail_policy == "fail_fast":
-        raise RuntimeError(
-            "SAM3 track stream raised IndexError and fail-fast policy is enabled "
-            f"({context}): {type(exc).__name__}: {exc}"
-        ) from exc
-
-    raise ValueError(
-        f"Unknown --sam3-track-tail-policy '{tail_policy}'. "
-        f"Expected one of: {', '.join(TRACK_TAIL_POLICY_CHOICES)}."
-    )
 
 
 def slugify_prompt(prompt: str) -> str:
@@ -494,124 +357,6 @@ def compute_sample_interval(video_fps: float, target_fps: float) -> int:
     if video_fps <= 0:
         return 1
     return max(1, round(video_fps / target_fps))
-
-
-def _find_prompt_idx_by_label(label: str, prompts: list[str]) -> int | None:
-    if not label:
-        return None
-    norm_label = label.strip().casefold()
-    for idx, prompt in enumerate(prompts):
-        if prompt.strip().casefold() == norm_label:
-            return idx
-    return None
-
-
-def extract_prompt_masks_and_objects(
-    sam_result: Any,
-    prompts: list[str],
-    prompt_slugs: list[str],
-    frame_shape_hw: tuple[int, int],
-) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
-    height, width = frame_shape_hw
-    prompt_masks = [np.zeros((height, width), dtype=bool) for _ in prompts]
-    object_rows: list[dict[str, Any]] = []
-
-    if sam_result.masks is None or sam_result.masks.data is None:
-        return [mask.astype(np.uint8) for mask in prompt_masks], object_rows
-
-    masks_data = sam_result.masks.data.detach().cpu().numpy()
-    if masks_data.size == 0:
-        return [mask.astype(np.uint8) for mask in prompt_masks], object_rows
-    det_masks = masks_data > 0
-    num_dets = det_masks.shape[0]
-
-    boxes = sam_result.boxes
-    xyxy = (
-        boxes.xyxy.detach().cpu().numpy()
-        if boxes is not None and boxes.xyxy is not None
-        else np.zeros((num_dets, 4), dtype=np.float32)
-    )
-    confs = (
-        boxes.conf.detach().cpu().numpy()
-        if boxes is not None and boxes.conf is not None
-        else np.zeros((num_dets,), dtype=np.float32)
-    )
-
-    cls_ids = None
-    if boxes is not None and boxes.cls is not None:
-        cls_ids = boxes.cls.detach().cpu().numpy().astype(np.int64)
-    track_ids = (
-        boxes.id.detach().cpu().numpy().astype(np.int64)
-        if boxes is not None and getattr(boxes, "is_track", False) and boxes.id is not None
-        else np.full((num_dets,), -1, dtype=np.int64)
-    )
-    names = sam_result.names if hasattr(sam_result, "names") else None
-
-    for det_idx in range(num_dets):
-        det_mask = det_masks[det_idx]
-        if det_mask.shape != (height, width):
-            det_mask = cv2.resize(
-                det_mask.astype(np.uint8),
-                (width, height),
-                interpolation=cv2.INTER_NEAREST,
-            ).astype(bool)
-
-        cls_id = int(cls_ids[det_idx]) if cls_ids is not None and det_idx < len(cls_ids) else -1
-        prompt_idx = None
-        if len(prompts) > 0:
-            if 0 <= cls_id < len(prompts):
-                prompt_idx = cls_id
-            elif isinstance(names, dict) and cls_id in names:
-                prompt_idx = _find_prompt_idx_by_label(str(names[cls_id]), prompts)
-
-            # Fallback for unknown class mapping: assign to first prompt.
-            if prompt_idx is None:
-                prompt_idx = 0
-            prompt_masks[prompt_idx] |= det_mask
-
-        mask_pixels = int(det_mask.sum())
-        bbox_xyxy: list[int] | None = None
-        center_xy: list[int] | None = None
-        if mask_pixels > 0:
-            ys, xs = np.where(det_mask)
-            xmin, xmax = int(xs.min()), int(xs.max())
-            ymin, ymax = int(ys.min()), int(ys.max())
-            bbox_xyxy = [xmin, ymin, xmax, ymax]
-            center_xy = [int((xmin + xmax) // 2), int((ymin + ymax) // 2)]
-        elif det_idx < len(xyxy):
-            x1, y1, x2, y2 = [int(round(v)) for v in xyxy[det_idx].tolist()]
-            x1 = max(0, min(x1, width - 1))
-            x2 = max(0, min(x2, width - 1))
-            y1 = max(0, min(y1, height - 1))
-            y2 = max(0, min(y2, height - 1))
-            if x2 < x1:
-                x1, x2 = x2, x1
-            if y2 < y1:
-                y1, y2 = y2, y1
-            bbox_xyxy = [x1, y1, x2, y2]
-            center_xy = [int((x1 + x2) // 2), int((y1 + y2) // 2)]
-
-        label = str(cls_id)
-        if isinstance(names, dict) and cls_id in names:
-            label = str(names[cls_id])
-
-        object_rows.append(
-            {
-                "object_index": int(det_idx),
-                "track_id": int(track_ids[det_idx]) if det_idx < len(track_ids) and int(track_ids[det_idx]) >= 0 else None,
-                "prompt_index": int(prompt_idx) if prompt_idx is not None else None,
-                "prompt": prompts[prompt_idx] if prompt_idx is not None and prompt_idx < len(prompts) else None,
-                "slug": prompt_slugs[prompt_idx] if prompt_idx is not None and prompt_idx < len(prompt_slugs) else None,
-                "label": label,
-                "confidence": float(confs[det_idx]) if det_idx < len(confs) else None,
-                "bbox_xyxy": bbox_xyxy,
-                "center_xy": center_xy,
-                "mask_nonzero_pixels": mask_pixels,
-                "mask": det_mask.astype(np.uint8),
-            }
-        )
-
-    return [mask.astype(np.uint8) for mask in prompt_masks], object_rows
 
 
 def run_da3_inference_batch(da3: DepthAnything3, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
@@ -731,54 +476,31 @@ def compute_mask_geometry(union_mask_bool: np.ndarray) -> tuple[int, float, list
     return nonzero_pixels, area_fraction, [xmin, ymin, xmax, ymax], [cx, cy]
 
 
-def extract_track_summary(sam_result: Any) -> dict[str, Any]:
-    summary = {"active_track_count": 0, "tracks": []}
-    if sam_result is None or sam_result.boxes is None or len(sam_result.boxes) == 0:
-        return summary
+def filter_objects_by_conf(
+    prompt_masks: list[np.ndarray],
+    object_rows: list[dict[str, Any]] | None,
+    conf: float,
+    frame_shape_hw: tuple[int, int],
+) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
+    """Final confidence filter applied identically to both backends' output.
 
-    boxes = sam_result.boxes
-    xyxy = boxes.xyxy.detach().cpu().numpy() if boxes.xyxy is not None else np.zeros((0, 4))
-    confs = boxes.conf.detach().cpu().numpy() if boxes.conf is not None else np.zeros((len(boxes),))
-    classes = boxes.cls.detach().cpu().numpy().astype(np.int64) if boxes.cls is not None else np.zeros((len(boxes),), dtype=np.int64)
-    ids = (
-        boxes.id.detach().cpu().numpy().astype(np.int64)
-        if getattr(boxes, "is_track", False) and boxes.id is not None
-        else np.full((len(boxes),), -1, dtype=np.int64)
-    )
+    A no-op for UltralyticsBackend (its predictor already filters by `--conf` internally, so
+    every row already clears the threshold); this is the primary confidence filter for
+    OfficialSam3Backend, whose `--sam3-det-threshold` only controls its own internal
+    propagate_in_video call.
+    """
+    rows = object_rows or []
+    kept = [row for row in rows if row.get("confidence") is None or float(row["confidence"]) >= conf]
+    if len(kept) == len(rows):
+        return prompt_masks, rows
 
-    names = sam_result.names if hasattr(sam_result, "names") else {}
-    det_mask_pixels = np.zeros((len(boxes),), dtype=np.int64)
-    if sam_result.masks is not None and sam_result.masks.data is not None:
-        det_masks = sam_result.masks.data.detach().cpu().numpy() > 0
-        if det_masks.shape[0] == len(boxes):
-            det_mask_pixels = det_masks.reshape(det_masks.shape[0], -1).sum(axis=1).astype(np.int64)
-
-    track_ids_non_null: set[int] = set()
-    tracks: list[dict[str, Any]] = []
-    for i in range(len(boxes)):
-        cls_id = int(classes[i]) if i < len(classes) else -1
-        track_id = int(ids[i]) if i < len(ids) and int(ids[i]) >= 0 else None
-        if track_id is not None:
-            track_ids_non_null.add(track_id)
-
-        label = str(cls_id)
-        if isinstance(names, dict) and cls_id in names:
-            label = str(names[cls_id])
-
-        bbox = [int(round(v)) for v in xyxy[i].tolist()] if i < len(xyxy) else None
-        tracks.append(
-            {
-                "track_id": track_id,
-                "label": label,
-                "confidence": float(confs[i]) if i < len(confs) else None,
-                "bbox_xyxy": bbox,
-                "mask_pixels": int(det_mask_pixels[i]) if i < len(det_mask_pixels) else 0,
-            }
-        )
-
-    summary["tracks"] = tracks
-    summary["active_track_count"] = len(track_ids_non_null) if track_ids_non_null else len(tracks)
-    return summary
+    height, width = frame_shape_hw
+    filtered_masks = [np.zeros((height, width), dtype=np.uint8) for _ in prompt_masks]
+    for row in kept:
+        prompt_idx = row.get("prompt_index")
+        if prompt_idx is not None and 0 <= prompt_idx < len(filtered_masks):
+            filtered_masks[prompt_idx] |= np.asarray(row["mask"], dtype=np.uint8)
+    return filtered_masks, kept
 
 
 def process_video(
@@ -786,8 +508,7 @@ def process_video(
     video_path: Path,
     output_root: Path,
     args: argparse.Namespace,
-    sam3_frame: SAM3SemanticPredictor | None,
-    sam3_track: Any,
+    backend: Any,
     da3: DepthAnything3 | None,
     da3_stream_config: Path,
     prompt_slugs: list[str],
@@ -841,6 +562,8 @@ def process_video(
         "frame_height": 0,
         "sam3_prompts": list(args.sam3_text_prompts),
         "sam3_conf": float(args.conf),
+        "sam3_backend": args.sam3_backend,
+        "sam3_det_threshold": float(args.sam3_det_threshold),
         "sam3_track_isolation": args.sam3_track_isolation if args.sam3_mode == "track" else None,
         "sam3_track_tail_policy": args.sam3_track_tail_policy if args.sam3_mode == "track" else None,
         "sam3_track_setup_actions": list(track_setup_actions or []),
@@ -1176,212 +899,84 @@ def process_video(
     video_json["frame_height"] = frame_height
 
     try:
-        if args.sam3_mode == "frame":
-            if sam3_frame is None:
-                raise RuntimeError("SAM3 frame predictor is not initialized.")
-            cap = cv2.VideoCapture(str(video_path))
-            try:
-                frame_idx = 0
-                while True:
-                    ret, frame_bgr = cap.read()
-                    if not ret:
-                        if frame_count_est > 0 and frame_idx < frame_count_est - 1:
-                            timestamp = float(frame_idx / video_fps) if video_fps > 0 else None
-                            rec = base_frame_record(frame_idx, timestamp)
-                            rec["sam3_mode"] = "frame"
-                            rec["track_summary"] = None
-                            rec["status"] = "frame_decode_error"
-                            rec["timing_ms"]["total_ms"] = 0.0
-                            frame_rows.append(rec)
-                            counts["error_frames"] += 1
-                        break
+        for result in backend.iter_video(
+            video_path=video_path,
+            mode=args.sam3_mode,
+            prompts=args.sam3_text_prompts,
+            prompt_slugs=prompt_slugs,
+            sample_interval=sample_interval,
+            video_fps=video_fps,
+            frame_count_est=frame_count_est,
+            estimated_sampled_frames=estimated_sampled_frames,
+            warnings=video_json["warnings"],
+        ):
+            counts["sampled_frames"] += 1
+            update_batch_progress()
+            timestamp = float(result.frame_idx / video_fps) if video_fps > 0 else None
+            rec = base_frame_record(result.frame_idx, timestamp)
+            rec["sam3_mode"] = args.sam3_mode
+            rec["track_summary"] = result.track_summary
+            frame_start = time.perf_counter()
 
-                    if frame_idx % sample_interval != 0:
-                        frame_idx += 1
-                        continue
+            if result.status == "frame_decode_error":
+                rec["status"] = "frame_decode_error"
+                rec["timing_ms"]["total_ms"] = 0.0
+                frame_rows.append(rec)
+                counts["error_frames"] += 1
+                continue
 
-                    counts["sampled_frames"] += 1
-                    update_batch_progress()
-                    sample_seq_idx = len(sampled_frames_bgr)
-                    sampled_frames_bgr.append(frame_bgr)
-                    timestamp = float(frame_idx / video_fps) if video_fps > 0 else None
-                    rec = base_frame_record(frame_idx, timestamp)
-                    rec["sam3_mode"] = "frame"
-                    rec["track_summary"] = None
-                    frame_start = time.perf_counter()
+            if result.status == "sam_error":
+                rec["status"] = "sam_error"
+                rec["error"] = result.error
+                rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
+                if rec["track_summary"] is None:
+                    rec["track_summary"] = {"active_track_count": 0, "tracks": []}
+                frame_rows.append(rec)
+                counts["error_frames"] += 1
+                continue
 
-                    try:
-                        sam_start = time.perf_counter()
-                        sam_results = sam3_frame(source=frame_bgr, text=args.sam3_text_prompts)
-                        sam_result = sam_results[0]
-                        prompt_masks, object_entries = extract_prompt_masks_and_objects(
-                            sam_result,
-                            args.sam3_text_prompts,
-                            prompt_slugs,
-                            frame_bgr.shape[:2],
-                        )
-                        rec["timing_ms"]["sam_ms"] = (time.perf_counter() - sam_start) * 1000.0
-                    except Exception as exc:
-                        rec["status"] = "sam_error"
-                        rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
-                        rec["error"] = f"{type(exc).__name__}: {exc}"
-                        frame_rows.append(rec)
-                        counts["error_frames"] += 1
-                        frame_idx += 1
-                        continue
-
-                    union_mask_bool = np.zeros(frame_bgr.shape[:2], dtype=bool)
-                    for mask in prompt_masks:
-                        union_mask_bool |= mask.astype(bool)
-                    nonzero_pixels, area_fraction, bbox_xyxy, center_xy = compute_mask_geometry(union_mask_bool)
-                    rec["mask_nonzero_pixels"] = nonzero_pixels
-                    rec["mask_area_fraction"] = area_fraction
-                    rec["bbox_xyxy"] = bbox_xyxy
-                    rec["center_xy"] = center_xy
-
-                    if nonzero_pixels == 0:
-                        rec["status"] = "empty_mask"
-                        rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
-                        frame_rows.append(rec)
-                        counts["empty_mask_frames"] += 1
-                        frame_idx += 1
-                        continue
-
-                    pending_da3.append(
-                        {
-                            "frame_idx": frame_idx,
-                            "sample_seq_idx": sample_seq_idx,
-                            "rec": rec,
-                            "frame_bgr": frame_bgr if args.da3_mode == "batch" else None,
-                            "union_mask_bool": union_mask_bool,
-                            "center_xy": center_xy,
-                            "prompt_masks": prompt_masks,
-                            "object_entries": object_entries,
-                            "frame_start": frame_start,
-                        }
-                    )
-                    if args.da3_mode == "batch" and len(pending_da3) >= da3_batch_size:
-                        flush_pending_da3()
-                    frame_idx += 1
-            finally:
-                cap.release()
-        else:
-            if sam3_track is None:
-                raise RuntimeError("SAM3 track predictor is not initialized.")
-
-            sampled_idx = 0
-            validated_track_state = False
-            track_stream = sam3_track(
-                source=str(video_path),
-                text=args.sam3_text_prompts,
-                stream=True,
-                vid_stride=sample_interval,
+            rec["timing_ms"]["sam_ms"] = result.timing_ms_sam
+            frame_bgr = result.frame_bgr
+            prompt_masks, object_entries = filter_objects_by_conf(
+                result.prompt_masks, result.object_rows, args.conf, frame_bgr.shape[:2]
             )
-            track_iter = iter(track_stream)
-            while True:
-                try:
-                    sam_result = next(track_iter)
-                except StopIteration:
-                    break
-                except IndexError as exc:
-                    dataset_frame = getattr(getattr(sam3_track, "dataset", None), "frame", None)
-                    should_finalize = handle_track_stream_index_error(
-                        exc=exc,
-                        video_stem=video_stem,
-                        sampled_idx=sampled_idx,
-                        dataset_frame=dataset_frame,
-                        sample_interval=sample_interval,
-                        isolation_mode=args.sam3_track_isolation,
-                        tail_policy=args.sam3_track_tail_policy,
-                        warnings=video_json["warnings"],
-                    )
-                    if should_finalize:
-                        break
 
-                default_frame_idx = sampled_idx * sample_interval
-                dataset_frame = getattr(getattr(sam3_track, "dataset", None), "frame", None)
-                frame_idx = (
-                    int(dataset_frame) - 1
-                    if isinstance(dataset_frame, int) and dataset_frame > 0
-                    else default_frame_idx
-                )
-                timestamp = float(frame_idx / video_fps) if video_fps > 0 else None
-                rec = base_frame_record(frame_idx, timestamp)
-                rec["sam3_mode"] = "track"
-                frame_start = time.perf_counter()
-                counts["sampled_frames"] += 1
-                update_batch_progress()
-                sampled_idx += 1
-                if not validated_track_state:
-                    video_json["sam3_tracker_num_frames"] = validate_track_state_num_frames(
-                        sam3_track=sam3_track,
-                        video_stem=video_stem,
-                        expected_total_frames=frame_count_est if frame_count_est > 0 else None,
-                        expected_sampled_frames=estimated_sampled_frames,
-                        sample_interval=sample_interval,
-                    )
-                    validated_track_state = True
+            union_mask_bool = np.zeros(frame_bgr.shape[:2], dtype=bool)
+            for mask in prompt_masks:
+                union_mask_bool |= mask.astype(bool)
+            nonzero_pixels, area_fraction, bbox_xyxy, center_xy = compute_mask_geometry(union_mask_bool)
+            rec["mask_nonzero_pixels"] = nonzero_pixels
+            rec["mask_area_fraction"] = area_fraction
+            rec["bbox_xyxy"] = bbox_xyxy
+            rec["center_xy"] = center_xy
 
-                try:
-                    rec["track_summary"] = extract_track_summary(sam_result)
-                    speed = getattr(sam_result, "speed", None)
-                    if isinstance(speed, dict):
-                        inference_ms = speed.get("inference")
-                        rec["timing_ms"]["sam_ms"] = float(inference_ms) if inference_ms is not None else None
+            if nonzero_pixels == 0:
+                rec["status"] = "empty_mask"
+                rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
+                frame_rows.append(rec)
+                counts["empty_mask_frames"] += 1
+                continue
 
-                    frame_bgr = getattr(sam_result, "orig_img", None)
-                    if frame_bgr is None:
-                        raise RuntimeError("SAM3 track result did not include orig_img.")
-                    sample_seq_idx = len(sampled_frames_bgr)
-                    sampled_frames_bgr.append(frame_bgr)
+            sample_seq_idx = len(sampled_frames_bgr)
+            sampled_frames_bgr.append(frame_bgr)
+            pending_da3.append(
+                {
+                    "frame_idx": result.frame_idx,
+                    "sample_seq_idx": sample_seq_idx,
+                    "rec": rec,
+                    "frame_bgr": frame_bgr if args.da3_mode == "batch" else None,
+                    "union_mask_bool": union_mask_bool,
+                    "center_xy": center_xy,
+                    "prompt_masks": prompt_masks,
+                    "object_entries": object_entries,
+                    "frame_start": frame_start,
+                }
+            )
+            if args.da3_mode == "batch" and len(pending_da3) >= da3_batch_size:
+                flush_pending_da3()
 
-                    prompt_masks, object_entries = extract_prompt_masks_and_objects(
-                        sam_result,
-                        args.sam3_text_prompts,
-                        prompt_slugs,
-                        frame_bgr.shape[:2],
-                    )
-                except Exception as exc:
-                    rec["status"] = "sam_error"
-                    rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
-                    rec["error"] = f"{type(exc).__name__}: {exc}"
-                    if rec["track_summary"] is None:
-                        rec["track_summary"] = {"active_track_count": 0, "tracks": []}
-                    frame_rows.append(rec)
-                    counts["error_frames"] += 1
-                    continue
-
-                union_mask_bool = np.zeros(frame_bgr.shape[:2], dtype=bool)
-                for mask in prompt_masks:
-                    union_mask_bool |= mask.astype(bool)
-                nonzero_pixels, area_fraction, bbox_xyxy, center_xy = compute_mask_geometry(union_mask_bool)
-                rec["mask_nonzero_pixels"] = nonzero_pixels
-                rec["mask_area_fraction"] = area_fraction
-                rec["bbox_xyxy"] = bbox_xyxy
-                rec["center_xy"] = center_xy
-
-                if nonzero_pixels == 0:
-                    rec["status"] = "empty_mask"
-                    rec["timing_ms"]["total_ms"] = (time.perf_counter() - frame_start) * 1000.0
-                    frame_rows.append(rec)
-                    counts["empty_mask_frames"] += 1
-                    continue
-
-                pending_da3.append(
-                    {
-                        "frame_idx": frame_idx,
-                        "sample_seq_idx": sample_seq_idx,
-                        "rec": rec,
-                        "frame_bgr": frame_bgr if args.da3_mode == "batch" else None,
-                        "union_mask_bool": union_mask_bool,
-                        "center_xy": center_xy,
-                        "prompt_masks": prompt_masks,
-                        "object_entries": object_entries,
-                        "frame_start": frame_start,
-                    }
-                )
-                if args.da3_mode == "batch" and len(pending_da3) >= da3_batch_size:
-                    flush_pending_da3()
+        if args.sam3_mode == "track":
+            video_json["sam3_tracker_num_frames"] = getattr(backend, "last_tracker_num_frames", None)
 
         if args.da3_mode == "stream":
             flush_da3_stream_inference()
@@ -1445,26 +1040,22 @@ def main() -> None:
     da3: DepthAnything3 | None = None
     if args.da3_mode in ("batch", "all_frames"):
         da3 = DepthAnything3.from_pretrained(args.da3_model_id).to(device)
-    sam3_overrides = dict(
-        conf=args.conf,
-        task="segment",
-        mode="predict",
-        model=args.sam3_model_path,
-        half=use_half,
-        save=False,
-        verbose=False,
-    )
-    sam3_frame: SAM3SemanticPredictor | None = None
-    sam3_track: Any = None
-    if args.sam3_mode == "frame":
-        sam3_frame = SAM3SemanticPredictor(overrides=sam3_overrides)
+
+    backend: Any
+    if args.sam3_backend == "ultralytics":
+        backend = UltralyticsBackend(
+            sam3_model_path=args.sam3_model_path,
+            conf=args.conf,
+            half=use_half,
+            track_isolation=args.sam3_track_isolation,
+            track_tail_policy=args.sam3_track_tail_policy,
+        )
     else:
-        if SAM3VideoSemanticPredictor is None:
-            raise ImportError(
-                "SAM3VideoSemanticPredictor is not available in this ultralytics build. "
-                "Upgrade ultralytics or run with --sam3-mode frame."
-            )
-        sam3_track = None
+        backend = OfficialSam3Backend(
+            sam3_model_path=args.sam3_model_path,
+            det_threshold=args.sam3_det_threshold,
+            device=str(device),
+        )
 
     manifest: dict[str, Any] = {
         "started_at_utc": utc_now_iso(),
@@ -1478,6 +1069,8 @@ def main() -> None:
         "sam3_track_tail_policy": args.sam3_track_tail_policy if args.sam3_mode == "track" else None,
         "sam3_model_path": str(Path(args.sam3_model_path).resolve()),
         "sam3_prompts": list(args.sam3_text_prompts),
+        "sam3_backend": args.sam3_backend,
+        "sam3_det_threshold": float(args.sam3_det_threshold),
         "da3_mode": args.da3_mode,
         "da3_model_id": args.da3_model_id,
         "da3_stream_config": str(da3_stream_config.resolve()) if args.da3_mode == "stream" else None,
@@ -1498,33 +1091,27 @@ def main() -> None:
     for idx, video_path in enumerate(all_videos, start=1):
         print(f"[{idx}/{len(all_videos)}] Processing {video_path.name} ...")
         track_setup_actions: list[str] = []
-        current_sam3_track = sam3_track
         video_stem = video_path.stem
         video_out_dir = output_root / video_stem
         output_exists = (
             (video_out_dir / f"{video_stem}.json").exists()
-            and (video_out_dir / f"{video_stem}_arrays.npz").exists()
+            and (not args.npz or (video_out_dir / f"{video_stem}_arrays.npz").exists())
         )
         needs_processing = bool(args.overwrite) or not output_exists
 
-        if args.sam3_mode == "track" and needs_processing:
-            current_sam3_track, track_setup_actions = prepare_sam3_track_predictor_for_video(
-                sam3_track=sam3_track,
-                isolation_mode=args.sam3_track_isolation,
-                sam3_overrides=sam3_overrides,
-            )
-            sam3_track = current_sam3_track
-            print(
-                "  -> track setup: "
-                f"{', '.join(track_setup_actions) if track_setup_actions else 'none'}"
-            )
+        if needs_processing:
+            track_setup_actions = backend.prepare_for_video(mode=args.sam3_mode)
+            if track_setup_actions:
+                print(
+                    "  -> track setup: "
+                    f"{', '.join(track_setup_actions)}"
+                )
 
         entry = process_video(
             video_path=video_path,
             output_root=output_root,
             args=args,
-            sam3_frame=sam3_frame,
-            sam3_track=current_sam3_track,
+            backend=backend,
             da3=da3,
             da3_stream_config=da3_stream_config,
             prompt_slugs=prompt_slugs,

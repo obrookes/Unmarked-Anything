@@ -144,7 +144,7 @@ def test_prepare_track_predictor_recreate(monkeypatch: pytest.MonkeyPatch) -> No
         created.append(obj)
         return obj
 
-    monkeypatch.setattr(dap3_cli, "create_sam3_track_predictor", _factory)
+    monkeypatch.setattr(dap3_cli.sam3_backends, "create_sam3_track_predictor", _factory)
     predictor, actions = dap3_cli.prepare_sam3_track_predictor_for_video(
         sam3_track=object(),
         isolation_mode="recreate",
@@ -162,9 +162,9 @@ def test_prepare_track_predictor_reset_reuses_instance(monkeypatch: pytest.Monke
         reset_calls.append(obj)
         return ["cleared"]
 
-    monkeypatch.setattr(dap3_cli, "reset_sam3_track_predictor_state", _reset)
+    monkeypatch.setattr(dap3_cli.sam3_backends, "reset_sam3_track_predictor_state", _reset)
     monkeypatch.setattr(
-        dap3_cli,
+        dap3_cli.sam3_backends,
         "create_sam3_track_predictor",
         lambda overrides: (_ for _ in ()).throw(AssertionError("create should not be called")),
     )
@@ -189,8 +189,8 @@ def test_prepare_track_predictor_both_resets_then_recreates(monkeypatch: pytest.
         order.append("create")
         return types.SimpleNamespace()
 
-    monkeypatch.setattr(dap3_cli, "reset_sam3_track_predictor_state", _reset)
-    monkeypatch.setattr(dap3_cli, "create_sam3_track_predictor", _factory)
+    monkeypatch.setattr(dap3_cli.sam3_backends, "reset_sam3_track_predictor_state", _reset)
+    monkeypatch.setattr(dap3_cli.sam3_backends, "create_sam3_track_predictor", _factory)
     _, actions = dap3_cli.prepare_sam3_track_predictor_for_video(
         sam3_track=object(),
         isolation_mode="both",

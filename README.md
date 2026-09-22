@@ -79,6 +79,10 @@ python apps/camera_trap/cli/dap3_cli.py \
 Default mask persistence now writes COCO RLE only. Use `--mask-storage-format both` when you need
 paired raw+RLE outputs for transitional validation or storage comparisons.
 
+Default `--sam3-backend official` runs the facebookresearch/sam3 package (SA-FARI checkpoints,
+`--sam3-mode track` only). Pass `--sam3-backend ultralytics` to use the ultralytics SAM3 port
+instead (needed for `--sam3-mode frame`, or for comparison runs).
+
 Legacy wrapper also works: `python dap3_cli.py ...`
 
 Streaming mode example (DA3-Streaming on all sampled frames):
@@ -210,7 +214,9 @@ python apps/camera_trap/cli/dap3_cli.py \
 | `--da3-batch-size` | int | yes | - | Positive integer required by CLI. In `batch` mode it is the DA3 batch size; in `stream` and `all_frames` modes it is retained for compatibility/progress accounting. |
 | `--target-fps` | float | no | `1.0` | Sampling rate for processing. Must be `> 0`. |
 | `--sam3-mode` | enum | no | `track` | `track` (video tracking) or `frame` (per-frame segmentation). |
-| `--conf` | float | no | `0.25` | SAM3 confidence threshold. |
+| `--conf` | float | no | `0.25` | SAM3 confidence threshold (final filter, applied identically to both backends' output). |
+| `--sam3-backend` | enum | no | `official` | `official` (facebookresearch/sam3, SA-FARI checkpoints; `--sam3-mode track` only) or `ultralytics` (ultralytics SAM3 port; `track` or `frame`). |
+| `--sam3-det-threshold` | float | no | `0.5` | Detection/presence score threshold passed to the official backend's internal `propagate_in_video` call. Ignored by `--sam3-backend ultralytics`. |
 | `--device` | enum | no | `auto` | `auto`, `cuda`, or `cpu`. |
 | `--half` | flag | no | `false` | Enable FP16 for SAM3 (CUDA only). |
 | `--mask-storage-format` | enum | no | `rle` | Mask persistence mode: `raw`, `rle`, or `both`. Use `both` only when you need paired raw+RLE artifacts for validation. |
@@ -234,7 +240,7 @@ Per-frame status values include: `processed`, `empty_mask`, `sam_error`, `da3_er
 - Non-overwrite mode skips videos that already have both expected output files.
 - `--da3-mode stream` runs DA3-Streaming in memory on all sampled frames; SAM outputs still control which frames are persisted as `processed` in JSON/NPZ.
 - `--da3-mode all_frames` runs standard DA3 in memory on all sampled frames; persisted depth storage remains aligned to `processed` (SAM-positive) frame rows.
-- If `--sam3-mode track` is unavailable in your ultralytics build, use `--sam3-mode frame`.
+- If `--sam3-mode track` is unavailable in your ultralytics build, use `--sam3-mode frame` with `--sam3-backend ultralytics` (the default `official` backend supports `track` only).
 - Default `--sam3-track-isolation recreate` prevents cross-video tracker state leakage in multi-video runs.
 - Use `hpc/scripts/summarize_track_run.py --run-dir <run>` for a quick forensic summary of per-video frame counts and track IDs.
 
