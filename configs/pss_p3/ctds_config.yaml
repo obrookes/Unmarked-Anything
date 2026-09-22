@@ -1,0 +1,20 @@
+# CTDS (camera-trap distance sampling) configuration for the PSS P3 chimpanzee
+# analysis, ported from wcf-pps-p3/scripts/PSS_P3_Chimp_CTDS_all.R
+area_km2: 3156.06
+region_label: "PSS_new_limits"
+snapshot_interval_s: 2
+exclude_transects: [13, 29]
+truncation:
+  left: 1
+  right: 12
+cutpoints: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+independence_min: 15
+fov_by_model:
+  DS-30MP: 38
+  DS-32MP: 50
+camera_operation_hours_per_day: 24
+activity:
+  reps: 1000
+  sample: "model"
+  adj: 1.5
+model: "auto"
