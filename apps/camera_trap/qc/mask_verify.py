@@ -50,14 +50,16 @@ MASK_QC_PROMPT = (
     "two images of the same camera-trap frame: the FIRST is the full raw frame for context, the "
     "SECOND is a crop around one tracked animal with its proposed mask drawn as a coloured "
     "semi-transparent fill with a 2px outline. Camera-trap frames are often greyscale/monochrome "
-    "night-vision (IR) footage; that alone is not a defect. "
-    "Decide whether the highlighted mask tightly covers exactly one whole animal: not background, "
-    "not vegetation, not only part of the animal, not more than one animal, and not a "
-    "non-animal object. "
+    "night-vision (IR) footage; that alone is not a defect. Animals are often partly occluded by "
+    "vegetation or partly cut off by the frame edge; that alone is not a defect either -- only "
+    "the parts of the animal actually visible in the frame matter. "
+    "Decide whether the highlighted mask tightly covers the visible parts of exactly one animal: "
+    "not background, not vegetation, not more than one animal, and not a non-animal object. "
     'Set "ok" to true only if the mask is accurate by that standard. If not, set "issue" to the '
     'single best match: "loose" (includes background/vegetation beyond the animal), "fragment" '
-    '(covers only part of the animal), "merged" (covers more than one animal), "wrong_object" '
-    '(not an animal), or "background" (no animal is actually there). Set "issue" to "none" iff ok '
+    "(misses a substantial visible part of the animal, e.g. only a limb is masked while the body "
+    'is visible), "merged" (covers more than one animal), "wrong_object" (not an animal), or '
+    '"background" (no animal is actually there). Set "issue" to "none" iff ok '
     'is true. Set "animal_visible" to true if any animal is visible anywhere in the crop, '
     "regardless of whether the mask is correct. "
     "Respond ONLY with a JSON object matching this schema: "
