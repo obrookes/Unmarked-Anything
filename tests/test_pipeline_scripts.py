@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 NEW_OR_CHANGED_SH = [
     "hpc/jobs/dap3_predict_array.sh",
-    "hpc/jobs/read_boards.sh",
+    "hpc/jobs/find_sign_frames.sh",
     "hpc/jobs/mask_verify_array.sh",
     "hpc/jobs/export_distances.sh",
     "hpc/jobs/ctds_abundance.sh",
