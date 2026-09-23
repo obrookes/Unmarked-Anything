@@ -39,15 +39,16 @@ def _background_depth() -> np.ndarray:
     return np.tile(cols, (H, 1)).astype(np.float64)
 
 
-def _write_camera_calib(calib_dir: Path, cam_name: str, *, all_far: bool = False) -> None:
+def _write_camera_calib(calib_dir: Path, cam_name: str, *, all_far: bool = False, calib_method: str | None = None) -> None:
+    """`calib_method=None` omits the key entirely, exercising load_camera_calib's default-to-
+    "per_camera" fallback for NPZs written before that key existed."""
     calib_dir.mkdir(parents=True, exist_ok=True)
     depth_bg = np.full((H, W), MAX_DEPTH, dtype=np.float64) if all_far else _background_depth()
     anchor_disp_raw = (1.0 / depth_bg).astype(np.float32)
     anchor_img = np.random.default_rng(0).integers(0, 255, size=(H, W, 3), dtype=np.uint8)
     anchor_person_mask = np.zeros((H, W), dtype=bool)
     knots_x, knots_y = _identity_knots()
-    np.savez(
-        calib_dir / f"{cam_name}.npz",
+    arrays = dict(
         anchor_disp_raw=anchor_disp_raw,
         anchor_img=anchor_img,
         anchor_person_mask=anchor_person_mask,
@@ -58,6 +59,9 @@ def _write_camera_calib(calib_dir: Path, cam_name: str, *, all_far: bool = False
         anchor_distance_m=np.float64(10.0),
         da3_model_id=np.str_("fake-model"),
     )
+    if calib_method is not None:
+        arrays["calib_method"] = np.str_(calib_method)
+    np.savez(calib_dir / f"{cam_name}.npz", **arrays)
 
 
 def _write_pooled_calib(calib_dir: Path) -> None:
@@ -178,6 +182,46 @@ def test_per_camera_recovers_known_distance(tmp_path: Path):
 
     summary = json.loads((out_dir / "apply_summary.json").read_text())
     assert summary["by_method"]["per_camera"] == 1
+
+
+def test_pooled_anchor_label_read_from_npz(tmp_path: Path):
+    """A camera NPZ carrying calib_method="pooled_anchor" (its own anchor/alignment, but knots
+    borrowed from the pooled curve) must be labelled pooled_anchor in the output CSV, not
+    per_camera -- this is the WP2 follow-up fix."""
+    calib_dir = tmp_path / "calib"
+    _write_camera_calib(calib_dir, "17_cam082", calib_method="pooled_anchor")
+    _write_pooled_calib(calib_dir)
+
+    depth_bg = _background_depth()
+    true_disp = (1.0 / depth_bg).astype(np.float64)
+    animal_distance = 8.0
+    true_disp[H // 2 - 4 : H // 2 + 4, W // 2 - 4 : W // 2 + 4] = 1.0 / animal_distance
+
+    m0, c0 = 1.3, 0.05
+    frame_disp = m0 * true_disp + c0
+    depth_raw = 1.0 / frame_disp
+
+    mask = _blob_mask(H // 2, W // 2)
+    job_dir = tmp_path / "job"
+    _make_job(job_dir, "17_Cam082_vid", depth_raw=depth_raw, mask=mask)
+
+    out_dir = tmp_path / "out"
+    code = applymod.main(["--job-dir", str(job_dir), "--calib-dir", str(calib_dir), "--out-dir", str(out_dir)])
+    assert code == 0
+
+    rows = _read_csv_rows(out_dir / "calibrated_objects.csv")
+    assert len(rows) == 1
+    assert rows[0]["calib_method"] == "pooled_anchor"
+
+    summary = json.loads((out_dir / "apply_summary.json").read_text())
+    assert summary["by_method"]["pooled_anchor"] == 1
+
+
+def test_load_camera_calib_defaults_calib_method_when_key_absent(tmp_path: Path):
+    calib_dir = tmp_path / "calib"
+    _write_camera_calib(calib_dir, "17_cam082")  # no calib_method key written
+    entry = applymod.load_camera_calib(calib_dir / "17_cam082.npz")
+    assert entry["calib_method"] == "per_camera"
 
 
 def test_failure_path_all_excluded(tmp_path: Path):

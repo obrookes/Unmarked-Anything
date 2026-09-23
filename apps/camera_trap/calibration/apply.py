@@ -11,6 +11,17 @@ read from that calibrated depth map at its mask's interior point (farthest-from-
 Cameras without a saved anchor (unknown transect_cam, or --force-pooled) fall back to a single
 pooled calibration curve fit across all reference cameras, with no per-frame alignment.
 
+Each row's `calib_method` reflects how its distance was derived, read from the camera's saved
+NPZ (build_reference.py; defaults to "per_camera" if the NPZ predates the `calib_method` key):
+  per_camera    camera has its own anchor and its own fitted curve (>=2 distinct reference
+                distances).
+  pooled_anchor camera has its own anchor (so per-frame alignment still happens), but the curve
+                is the cross-camera pooled one, borrowed for lack of >=2 distinct reference
+                distances.
+  pooled        camera has no saved anchor at all; no per-frame alignment, pooled curve applied
+                directly to the raw disparity.
+  failed        alignment or mask lookup failed for this row.
+
 Outputs (in --out-dir):
     calibrated_objects.csv       one row per (video, frame, track); see CSV_COLUMNS below.
     apply_summary.json           counts per calib_method, per camera, and failures by reason.
@@ -125,6 +136,7 @@ def load_camera_calib(npz_path: Path) -> dict[str, Any]:
             "knots_y": np.asarray(data["knots_y"], dtype=np.float64),
             "max_depth": float(data["max_depth"]),
             "min_depth": float(data["min_depth"]),
+            "calib_method": str(data["calib_method"].item()) if "calib_method" in data.files else "per_camera",
         }
     entry["curve"] = piecewise_from_knots(entry["knots_x"], entry["knots_y"])
     anchor_cal_depth = depth_from_disparity(entry["curve"](entry["anchor_disp_raw"]), entry["min_depth"], entry["max_depth"])
@@ -309,7 +321,7 @@ def _process_per_camera_frame(
         distance_m = float(depth_cal[pt_anchor])
         pt_raw = map_point(pt_anchor, anchor_shape, depth_raw.shape[:2])
         raw_depth = float(depth_raw[pt_raw])
-        rows.append(_row(video_name, frame_idx, obj, transect_cam, distance_m, raw_depth, "per_camera", info["inlier_frac"], homography_used))
+        rows.append(_row(video_name, frame_idx, obj, transect_cam, distance_m, raw_depth, cam_entry["calib_method"], info["inlier_frac"], homography_used))
     return rows
 
 
