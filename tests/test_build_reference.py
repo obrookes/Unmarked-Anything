@@ -89,7 +89,14 @@ def test_recovers_distances_with_per_instance_affine_drift():
             box = (10 + rep * 30, 10, 25 + rep * 30, 25)
             instances.append(_make_instance(d, box=box, m=m, c=c, event_id=f"e{d}_{rep}"))
 
-    npz_dict, rows, summary = br.build_camera_calibration(instances, transect_cam="camA")
+    # This fixture uses a fixed-size box regardless of distance_m (it's only testing recovery
+    # from per-instance affine drift), so it doesn't model mask_area ~ 1/distance^2, and it
+    # deliberately gives every instance a wildly different raw-disparity affine (m, c) despite
+    # tagging them all with the same "video" -- neither the size- nor alignment-consistency
+    # filter's assumptions hold here, so loosen both.
+    npz_dict, rows, summary = br.build_camera_calibration(
+        instances, transect_cam="camA", size_tolerance=1e6, align_tolerance=1e6
+    )
 
     assert summary["method"] == "per_camera"
     assert all(r["status"] == "ok" for r in rows)
@@ -97,17 +104,17 @@ def test_recovers_distances_with_per_instance_affine_drift():
     assert summary["insample_mae_m"] < 0.5
 
 
-def test_anchor_is_largest_distance_tie_broken_by_vlm_conf():
-    low_conf = _make_instance(10.0, vlm_conf=0.2, marker=1)
-    high_conf = _make_instance(10.0, box=(40, 10, 55, 25), vlm_conf=0.9, marker=2)
-    other = _make_instance(5.0, box=(10, 30, 25, 45), vlm_conf=1.0, marker=3)
+def test_anchor_is_smallest_area_tie_broken_by_vlm_conf():
+    small_low_conf = _make_instance(10.0, box=(10, 10, 20, 20), vlm_conf=0.2, marker=1)
+    small_high_conf = _make_instance(10.0, box=(40, 10, 50, 20), vlm_conf=0.9, marker=2)
+    large = _make_instance(5.0, box=(10, 30, 40, 60), vlm_conf=1.0, marker=3)
 
     npz_dict, rows, summary = br.build_camera_calibration(
-        [low_conf, other, high_conf], transect_cam="camB"
+        [small_low_conf, large, small_high_conf], transect_cam="camB"
     )
 
     assert summary["anchor_distance_m"] == 10.0
-    assert npz_dict["anchor_img"][0, 0, 0] == 2  # high_conf's marker, not low_conf's
+    assert npz_dict["anchor_img"][0, 0, 0] == 2  # small_high_conf's marker, not small_low_conf's
 
 
 def test_align_failure_when_mask_covers_almost_whole_frame():
@@ -149,9 +156,12 @@ def test_no_instances_returns_none_npz():
 
 
 def test_npz_keys_exact_for_per_camera_method():
-    distances = [4.0, 9.0]
-    instances = [_make_instance(d, box=(10 + i * 30, 10, 25 + i * 30, 25)) for i, d in enumerate(distances)]
-    npz_dict, rows, summary = br.build_camera_calibration(instances, transect_cam="camF", da3_model_id="foo")
+    # per_camera now requires >=3 distinct distances (a validated, cross-checked curve).
+    distances = [4.0, 9.0, 14.0]
+    instances = [_make_instance(d, box=(10 + i * 20, 10, 20 + i * 20, 20)) for i, d in enumerate(distances)]
+    npz_dict, rows, summary = br.build_camera_calibration(
+        instances, transect_cam="camF", da3_model_id="foo", size_tolerance=1e6
+    )
 
     expected_keys = {
         "anchor_disp_raw", "anchor_img", "anchor_person_mask", "knots_x", "knots_y",
@@ -162,6 +172,92 @@ def test_npz_keys_exact_for_per_camera_method():
     assert npz_dict["anchor_person_mask"].dtype == bool
     assert npz_dict["da3_model_id"] == "foo"
     assert npz_dict["calib_method"] == "per_camera"
+
+
+# --------------------------------------------------------------------------------------
+# robust-calibration filters (size/alignment/disparity consistency, anchor, fallback)
+# --------------------------------------------------------------------------------------
+
+def test_size_filter_rejects_vlm_misreads_and_keeps_good_fit():
+    # Genuine instances: mask_area ~ 1/distance^2 (k = distance*sqrt(area) ~ constant ~40).
+    genuine = [
+        (2.0, (2, 5, 22, 25)),    # area 400
+        (4.0, (25, 5, 35, 15)),   # area 100
+        (6.0, (38, 5, 45, 12)),   # area 49
+        (8.0, (48, 5, 53, 10)),   # area 25
+        (12.0, (2, 32, 5, 35)),   # area 9
+    ]
+    # VLM misreads: a real (small) mask paired with a "2.0 m" label, and a mid-size mask (like a
+    # real near-distance person) mislabeled "24.0 m", mirroring the reported 182_cam068 bug.
+    misreads = [
+        (2.0, (10, 32, 12, 34)),    # area 4 -- far too small for 2 m
+        (24.0, (16, 32, 26, 42)),   # area 100 -- far too big for 24 m
+    ]
+    instances = [_make_instance(d, box=box, event_id=f"good_{d}") for d, box in genuine]
+    instances += [_make_instance(d, box=box, event_id=f"misread_{i}") for i, (d, box) in enumerate(misreads)]
+
+    npz_dict, rows, summary = br.build_camera_calibration(instances, transect_cam="camMix")
+
+    misread_rows = [r for r in rows if r["event_id"].startswith("misread")]
+    good_rows = [r for r in rows if r["event_id"].startswith("good")]
+    assert all(r["status"] == "size_inconsistent" for r in misread_rows)
+    assert all(r["status"] == "ok" for r in good_rows)
+    assert summary["method"] == "per_camera"
+    assert summary["n_size_rejected"] == 2
+    assert summary["loo_mae_m"] < 1.0
+
+
+def test_fewer_than_3_instances_skips_size_filter():
+    # Wildly inconsistent k (tiny mask far outside what its distance implies) would normally be
+    # rejected, but with only 2 instances the size filter must not run at all.
+    tiny = _make_instance(2.0, box=(10, 10, 12, 12), event_id="tiny")  # area 4
+    normal = _make_instance(6.0, box=(10, 30, 40, 60), event_id="normal")  # area 900
+
+    npz_dict, rows, summary = br.build_camera_calibration([tiny, normal], transect_cam="camTiny")
+
+    assert all(r["status"] != "size_inconsistent" for r in rows)
+    assert summary["n_size_rejected"] == 0
+
+
+def test_loo_mae_over_threshold_falls_back_to_pooled():
+    rows = [
+        {"distance_m": 3.0, "mask_area_px": 1000.0, "x_aligned": 0.55, "x_raw": 0.55, "video": "v"},
+        {"distance_m": 3.0, "mask_area_px": 1000.0, "x_aligned": 0.20, "x_raw": 0.20, "video": "v"},
+        {"distance_m": 6.0, "mask_area_px": 250.0, "x_aligned": 0.25, "x_raw": 0.25, "video": "v"},
+        {"distance_m": 10.0, "mask_area_px": 90.0, "x_aligned": 0.15, "x_raw": 0.15, "video": "v"},
+    ]
+    rows_out, summary = br.calibrate_camera_from_rows(
+        rows, size_tolerance=1e6, align_tolerance=1e6, disp_tolerance=1e6
+    )
+    assert summary["method"] == "pooled"
+    assert "loo_mae>3.0" in summary["fallback_reason"]
+    assert summary["knots_x"] is None and summary["knots_y"] is None
+
+
+def test_non_monotone_curve_falls_back():
+    rows = [
+        {"distance_m": 3.0, "mask_area_px": 1000.0, "x_aligned": 0.15, "x_raw": 0.15, "video": "v"},
+        {"distance_m": 6.0, "mask_area_px": 250.0, "x_aligned": 0.35, "x_raw": 0.35, "video": "v"},
+        {"distance_m": 10.0, "mask_area_px": 90.0, "x_aligned": 0.10, "x_raw": 0.10, "video": "v"},
+    ]
+    rows_out, summary = br.calibrate_camera_from_rows(
+        rows, size_tolerance=1e6, align_tolerance=1e6, disp_tolerance=1e6
+    )
+    assert summary["method"] == "pooled"
+    assert "non_monotone" in summary["fallback_reason"]
+
+
+def test_pooled_excludes_size_and_disp_inconsistent_rows():
+    rows = [
+        {"transect_cam": "c", "status": "ok", "distance_m": 4.0, "x_raw": 0.25},
+        {"transect_cam": "c", "status": "align_failed", "distance_m": 4.0, "x_raw": float("nan")},
+        {"transect_cam": "c", "status": "size_inconsistent", "distance_m": 4.0, "x_raw": 999.0},
+        {"transect_cam": "c", "status": "disp_inconsistent", "distance_m": 4.0, "x_raw": -999.0},
+        {"transect_cam": "c", "status": "align_inconsistent", "distance_m": 4.0, "x_raw": -999.0},
+    ]
+    pooled = br.build_pooled(rows)
+    assert pooled is not None
+    assert pooled["n_instances"] == 1  # only the "ok" row
 
 
 # --------------------------------------------------------------------------------------
@@ -286,7 +382,9 @@ def test_cli_end_to_end_with_fakes(tmp_path, monkeypatch):
     ref_root.mkdir()
     video_a = ref_root / "camA_vid.mp4"
     video_b = ref_root / "camB_vid.mp4"
-    _write_video(video_a, {0: 5.0, 1: 10.0}, n_frames=2)
+    # per_camera now requires >=3 distinct distances (a validated, cross-checked curve), so camA
+    # needs a 3rd frame/distance.
+    _write_video(video_a, {0: 5.0, 1: 9.0, 2: 14.0}, n_frames=3)
     _write_video(video_b, {0: 6.0}, n_frames=1)
 
     calib_csv = tmp_path / "calibration_frames.csv"
@@ -297,7 +395,8 @@ def test_cli_end_to_end_with_fakes(tmp_path, monkeypatch):
             "sign_box_norm", "n_agree", "vlm_conf", "source",
         ])
         writer.writerow(["camA", "camA_vid.mp4", "ev1", 0, 5.0, _sign_box_norm_str(), 2, 0.9, "vlm"])
-        writer.writerow(["camA", "camA_vid.mp4", "ev2", 1, 10.0, _sign_box_norm_str(), 2, 0.9, "vlm"])
+        writer.writerow(["camA", "camA_vid.mp4", "ev2", 1, 9.0, _sign_box_norm_str(), 2, 0.9, "vlm"])
+        writer.writerow(["camA", "camA_vid.mp4", "ev4", 2, 14.0, _sign_box_norm_str(), 2, 0.9, "vlm"])
         writer.writerow(["camB", "camB_vid.mp4", "ev3", 0, 6.0, _sign_box_norm_str(), 2, 0.9, "vlm"])
 
     cameras_csv = tmp_path / "cameras.csv"
@@ -393,3 +492,57 @@ def test_cli_resume_skips_existing_camera_npz(tmp_path, monkeypatch):
     monkeypatch.setattr(br, "_make_segmenter", _boom)
     br.main(argv)
     assert npz_path.stat().st_mtime_ns == mtime_before
+
+
+# --------------------------------------------------------------------------------------
+# regression test against a real Isambard smoke-run instances CSV (no disparity maps recorded,
+# so this exercises `calibrate_camera_from_rows`, the pure filter+fit layer, directly on the
+# fixture's already-computed distance_m/mask_area_px/x_aligned/x_raw/video columns).
+# --------------------------------------------------------------------------------------
+
+def _load_smoke_fixture_rows() -> dict[str, list[dict]]:
+    fixture_path = REPO_ROOT / "tests" / "fixtures" / "calibration_instances_smoke.csv"
+    by_cam: dict[str, list[dict]] = {}
+    with fixture_path.open(newline="") as f:
+        for r in csv.DictReader(f):
+            if r["status"] != "ok":
+                continue
+            by_cam.setdefault(r["transect_cam"], []).append({
+                "distance_m": float(r["distance_m"]),
+                "mask_area_px": float(r["mask_area_px"]),
+                "x_aligned": float(r["x_aligned"]),
+                "x_raw": float(r["x_raw"]),
+                "video": r["event_id"].split("_")[0],
+            })
+    return by_cam
+
+
+def test_smoke_fixture_recovers_good_calibration_for_all_cameras():
+    by_cam = _load_smoke_fixture_rows()
+    good_cams = {"124_cam106", "15_cam126", "25_cam076"}
+    formerly_broken_cams = {"182_cam068", "3_cam006"}
+    assert set(by_cam) == good_cams | formerly_broken_cams
+
+    results = {}
+    for cam, rows in by_cam.items():
+        _, summary = br.calibrate_camera_from_rows(rows)
+        results[cam] = summary
+        print(f"{cam}: method={summary['method']} loo_mae_m={summary['loo_mae_m']}")
+
+    for cam in good_cams:
+        s = results[cam]
+        assert s["method"] == "per_camera"
+        assert s["loo_mae_m"] is not None and s["loo_mae_m"] < 3.0
+
+    for cam in formerly_broken_cams:
+        s = results[cam]
+        if s["method"] == "per_camera":
+            assert s["loo_mae_m"] is not None and np.isfinite(s["loo_mae_m"]) and s["loo_mae_m"] < 3.0
+        else:
+            assert s["method"] == "pooled"
+            assert s["fallback_reason"] != ""
+
+    # No camera may end up per_camera with a blown-up (or unmeasured) LOO MAE.
+    for cam, s in results.items():
+        if s["method"] == "per_camera":
+            assert s["loo_mae_m"] is not None and np.isfinite(s["loo_mae_m"]) and s["loo_mae_m"] < 3.0
