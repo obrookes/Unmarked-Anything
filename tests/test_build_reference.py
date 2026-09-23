@@ -293,6 +293,28 @@ def test_loo_truncated_to_near_distances_by_default():
     assert summary["loo_mae_all_m"] is not None and summary["loo_mae_all_m"] > summary["loo_mae_m"]
 
 
+def test_loo_extrapolation_is_clipped_to_min_max_depth():
+    # Curvature (steep near, shallow far) means removing the farthest endpoint (P3) leaves a
+    # 2-point line whose slope, extrapolated back to P3's disparity, goes negative -- exactly the
+    # unclipped inverse-depth-curve-inversion case that produced loo_mae_m ~= 55,555 on the real
+    # Isambard run (predicted depth = 1/eps). The real pipeline (apply.py) always converts curve
+    # output through timmh.depth_from_disparity(..., min_depth, max_depth), which clips to
+    # [min_depth, max_depth]; calibration-quality predictions must use the same conversion so the
+    # held-out prediction (and its error) stays bounded by max_depth instead of blowing up.
+    rows = [
+        {"distance_m": 2.0, "mask_area_px": 1000.0, "x_aligned": 1.00, "x_raw": 1.00, "video": "v"},
+        {"distance_m": 6.0, "mask_area_px": 500.0, "x_aligned": 0.95, "x_raw": 0.95, "video": "v"},
+        {"distance_m": 12.0, "mask_area_px": 100.0, "x_aligned": 0.30, "x_raw": 0.30, "video": "v"},
+    ]
+    rows_out, summary = br.calibrate_camera_from_rows(
+        rows, size_tolerance=1e6, align_tolerance=1e6, disp_tolerance=1e6,
+        min_depth=1.0, max_depth=25.0,
+    )
+    assert summary["loo_mae_m"] is not None and np.isfinite(summary["loo_mae_m"])
+    assert summary["loo_mae_m"] < 25.0  # bounded by max_depth, not the old ~55,555 eps blowup
+    assert summary["loo_mae_all_m"] is not None and summary["loo_mae_all_m"] < 25.0
+
+
 def test_align_tolerance_default_keeps_near_frames_with_proximity_scale_drift():
     # DA3's per-frame alignment scale genuinely shifts when a near person fills the frame: model
     # that as x_aligned/x_raw = 1.7 for near frames (2-3 m) vs. 1.0 for far frames (6-14 m), all
