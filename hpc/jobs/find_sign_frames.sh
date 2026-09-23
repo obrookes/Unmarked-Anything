@@ -61,7 +61,7 @@ export HF_HOME
 export TMPDIR=/tmp
 
 CMD=(
-  python "$REPO_ROOT/apps/camera_trap/calibration/find_sign_frames.py"
+  python3 "$REPO_ROOT/apps/camera_trap/calibration/find_sign_frames.py"
   --reference-map "$REFERENCE_MAP"
   --reference-root "$REFERENCE_ROOT"
   --out-dir "$OUT_DIR"

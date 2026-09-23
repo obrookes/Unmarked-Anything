@@ -60,7 +60,7 @@ if [[ "$CAMERAS_CSV" != /* ]]; then
 fi
 
 CMD=(
-  python "$REPO_ROOT/apps/camera_trap/calibration/build_reference.py"
+  python3 "$REPO_ROOT/apps/camera_trap/calibration/build_reference.py"
   --calibration-frames "$CALIBRATION_FRAMES"
   --reference-root "$REFERENCE_ROOT"
   --out-dir "$OUT_DIR"

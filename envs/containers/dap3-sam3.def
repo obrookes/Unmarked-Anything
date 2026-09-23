@@ -13,6 +13,10 @@ From: nvcr.io/nvidia/pytorch:25.06-py3
 %post
     export DEBIAN_FRONTEND=noninteractive
 
+    # ultralytics pulls in non-headless opencv-python, whose cv2 needs libGL/glib at import time.
+    apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+        && rm -rf /var/lib/apt/lists/*
+
     python3 -m pip install --no-cache-dir --upgrade pip
 
     # Pin the NGC-built torch/torchvision so sam3's and DA3's dependency resolution cannot

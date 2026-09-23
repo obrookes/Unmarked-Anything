@@ -95,8 +95,11 @@ class VLMEngine:
             tensor_parallel_size=self.tensor_parallel_size,
             max_model_len=self.max_model_len,
             gpu_memory_utilization=self.gpu_mem_util,
+            # Callers send at most 2 images (mask QC: overlay + crop) and never video.
+            limit_mm_per_prompt={"image": 2, "video": 0},
             enable_prefix_caching=True,
             seed=0,
+            **({"max_num_seqs": self.spec.max_num_seqs} if self.spec.max_num_seqs else {}),
         )
 
     def run_json(

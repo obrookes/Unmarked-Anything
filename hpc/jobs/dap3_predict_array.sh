@@ -205,7 +205,7 @@ mkdir -p "$WORK_OUTPUT_DIR"
 IFS=',' read -r -a PROMPTS <<< "$SAM3_TEXT_PROMPTS"
 
 CMD=(
-  python "$REPO_ROOT/dap3_cli.py"
+  python3 "$REPO_ROOT/dap3_cli.py"
   --input-video-dir "$INPUT_VIDEO_DIR"
   --output-dir "$WORK_OUTPUT_DIR"
   --sam3-model-path "$SAM3_MODEL_PATH"

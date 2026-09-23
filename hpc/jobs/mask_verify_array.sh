@@ -56,7 +56,7 @@ export HF_HOME
 export TMPDIR=/tmp
 
 CMD=(
-  python "$REPO_ROOT/apps/camera_trap/qc/mask_verify.py"
+  python3 "$REPO_ROOT/apps/camera_trap/qc/mask_verify.py"
   --job-dir "$JOB_DIR"
   --out-dir "$OUT_DIR"
   --model "$MODEL"

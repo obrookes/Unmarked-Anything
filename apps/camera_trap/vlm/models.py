@@ -26,6 +26,7 @@ class ModelSpec:
     tensor_parallel: int
     sampling: dict = field(default_factory=dict)
     family: str = "qwen"  # qwen | glm5_next
+    max_num_seqs: int | None = None  # None: vLLM default
 
     def render_prompt(self, tokenizer, prompt_text: str, think: bool = False, media: int = 1) -> str:
         """Chat-template `media` image parts followed by one text part into a prompt string.
@@ -73,6 +74,7 @@ SPECS = {
         tensor_parallel=4,
         sampling=GLM_SAMPLING,
         family="glm5_next",
+        max_num_seqs=32,  # vLLM's default 1024 exceeds GLM's 512 Mamba cache blocks; run_json chunks by 32
     ),
 }
 

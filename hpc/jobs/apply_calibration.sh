@@ -56,11 +56,11 @@ export TMPDIR=/tmp
 cd "$REPO_ROOT"
 
 if [[ "$MERGE" == "1" ]]; then
-  CMD=(python "$REPO_ROOT/apps/camera_trap/calibration/apply.py" --job-dir "$JOB_DIR" --calib-dir "$CALIB_DIR" --out-dir "$OUT_DIR" --merge)
+  CMD=(python3 "$REPO_ROOT/apps/camera_trap/calibration/apply.py" --job-dir "$JOB_DIR" --calib-dir "$CALIB_DIR" --out-dir "$OUT_DIR" --merge)
 else
   SHARD_INDEX="$SLURM_ARRAY_TASK_ID"
   CMD=(
-    python "$REPO_ROOT/apps/camera_trap/calibration/apply.py"
+    python3 "$REPO_ROOT/apps/camera_trap/calibration/apply.py"
     --job-dir "$JOB_DIR"
     --calib-dir "$CALIB_DIR"
     --out-dir "$OUT_DIR"
