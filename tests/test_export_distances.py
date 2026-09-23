@@ -308,3 +308,32 @@ def test_extract_transect_cam(filename, expected):
 
 def test_extract_transect_cam_no_match_returns_none():
     assert export_mod.extract_transect_cam("no_pattern_here") is None
+
+
+def test_load_video_times_skips_unparseable_rows(tmp_path: Path):
+    path = tmp_path / "video_times.csv"
+    path.write_text("video_name,start_datetime\n3_cam006_03240068,2024-03-24T07:15:02\nbad,not-a-date\n")
+    times = export_mod.load_video_times(path)
+    assert list(times) == ["3_cam006_03240068"]
+    assert times["3_cam006_03240068"].hour == 7
+
+
+def test_build_video_times_uses_earliest_row_per_video():
+    import pandas as pd
+
+    from apps.camera_trap.scripts.build_video_times import build_video_times
+
+    sheet = pd.DataFrame(
+        {
+            "Transect_cam": ["3_cam006", "3_cam006", "15_cam126", "15_cam126"],
+            "Video_name": ["03240068", "03240068", "3220171", None],
+            "Year": ["2024", "2024", "2024", "2024"],
+            "Month": ["3", "3", "3", "3"],
+            "Day": ["24", "24", "22", "22"],
+            "Hour": ["7", "7", "9", "9"],
+            "Min": ["15", "14", "5", "5"],
+            "Sec": ["2", "59", None, None],
+        }
+    )
+    out = build_video_times(sheet).set_index("video_name")["start_datetime"].to_dict()
+    assert out == {"15_cam126_03220171": "2024-03-22T09:05:00", "3_cam006_03240068": "2024-03-24T07:14:59"}

@@ -22,6 +22,7 @@ OUTPUT_CSV="${OUTPUT_CSV:?Set OUTPUT_CSV to the destination CSV path}"
 CALIBRATED_OBJECTS="${CALIBRATED_OBJECTS:-}"
 TRACK_QC="${TRACK_QC:-}"
 VIDEO_DIR="${VIDEO_DIR:-}"
+VIDEO_TIMES="${VIDEO_TIMES:-}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-2.0}"
 WINDOW_SECONDS="${WINDOW_SECONDS:-1.0}"
 CONDA_ENV="${CONDA_ENV:-dap3-stream}"
@@ -48,6 +49,9 @@ if [[ -n "$TRACK_QC" ]]; then
 fi
 if [[ -n "$VIDEO_DIR" ]]; then
   CMD+=(--video-dir "$VIDEO_DIR")
+fi
+if [[ -n "$VIDEO_TIMES" ]]; then
+  CMD+=(--video-times "$VIDEO_TIMES")
 fi
 
 echo "Host: $(hostname)"

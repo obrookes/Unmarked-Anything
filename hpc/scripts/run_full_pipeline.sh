@@ -56,6 +56,7 @@ TARGET_FPS="${TARGET_FPS:-6.0}"
 DEPTH_INTERVAL_S="${DEPTH_INTERVAL_S:-2}"
 MAIN_PROMPTS="${MAIN_PROMPTS:-ape}"
 MIN_DEPTH="${MIN_DEPTH:-1}"
+VIDEO_TIMES_CSV="${VIDEO_TIMES_CSV:-}"  # optional video_name,start_datetime CSV for export (stage E2)
 MAX_DEPTH="${MAX_DEPTH:-25}"
 EXTRINSIC_RECALIBRATION="${EXTRINSIC_RECALIBRATION:-0}"
 LIGHTGLUE_WEIGHTS="${LIGHTGLUE_WEIGHTS:-}"
@@ -330,6 +331,7 @@ else
   fi
   export_vars="ALL,REPO_ROOT=$REPO_ROOT,JOB_DIR=$MAIN_JOB_DIR,OUTPUT_CSV=$DISTANCES_CSV,CALIBRATED_OBJECTS=$CALIBRATED_OBJECTS_CSV,TRACK_QC=$TRACK_QC_CSV,INTERVAL_SECONDS=$DEPTH_INTERVAL_S"
   [[ -n "$DAP3_CONDA_ENV" ]] && export_vars="$export_vars,CONDA_ENV=$DAP3_CONDA_ENV"
+  [[ -n "$VIDEO_TIMES_CSV" ]] && export_vars="$export_vars,VIDEO_TIMES=$VIDEO_TIMES_CSV"
   JOB_ID_E2="$(submit_job_id sbatch "${sbatch_extra_args[@]}" "${dep_args[@]}" --job-name=export_distances \
     --export="$export_vars" "$REPO_ROOT/hpc/jobs/export_distances.sh")"
   echo "  job id: ${JOB_ID_E2:-<dry-run>}"

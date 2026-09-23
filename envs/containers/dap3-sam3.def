@@ -47,6 +47,7 @@ From: nvcr.io/nvidia/pytorch:25.06-py3
     #     build) if the SwiGLU fast path is needed for performance.
     PIP_CONSTRAINT=/tmp/constraints.txt python3 -m pip install --no-cache-dir \
         trimesh \
+        addict \
         einops \
         huggingface_hub \
         imageio \

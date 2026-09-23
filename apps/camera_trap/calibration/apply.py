@@ -438,9 +438,13 @@ def write_rows(csv_path: Path, rows: list[dict[str, Any]], append: bool) -> None
 
 def do_merge(out_dir: Path) -> None:
     shard_csvs = sorted(out_dir.glob("calibrated_objects.shard*.csv"))
-    if not shard_csvs:
-        raise FileNotFoundError(f"no calibrated_objects.shard*.csv found in {out_dir}")
     merged_csv = out_dir / "calibrated_objects.csv"
+    if not shard_csvs:
+        # A --num-shards 1 run writes calibrated_objects.csv directly; nothing to merge.
+        if merged_csv.is_file():
+            print(f"no shard files; {merged_csv} already written by a single-shard run")
+            return
+        raise FileNotFoundError(f"no calibrated_objects.shard*.csv found in {out_dir}")
     with merged_csv.open("w", newline="") as out_f:
         writer = csv.DictWriter(out_f, fieldnames=CSV_COLUMNS)
         writer.writeheader()

@@ -190,6 +190,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory to search for source videos (for ffprobe creation_time) instead of assets/videos.",
     )
+    parser.add_argument(
+        "--video-times",
+        type=Path,
+        default=None,
+        help=(
+            "Optional CSV (columns: video_name, start_datetime as ISO 8601) giving each video's start "
+            "time; takes precedence over ffprobe creation_time (which re-encoded videos lose)."
+        ),
+    )
     args = parser.parse_args()
     if args.interval_seconds <= 0:
         parser.error("--interval-seconds must be > 0.")
@@ -230,6 +239,17 @@ def parse_creation_time(raw: str) -> datetime | None:
         return datetime.fromisoformat(text)
     except ValueError:
         return None
+
+
+def load_video_times(path: Path) -> dict[str, datetime]:
+    """video_name -> start datetime from a --video-times CSV; unparseable rows are skipped."""
+    times: dict[str, datetime] = {}
+    with path.open(newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            dt = parse_creation_time((row.get("start_datetime") or "").strip())
+            if dt is not None:
+                times[(row.get("video_name") or "").strip()] = dt
+    return times
 
 
 def ffprobe_creation_time(video_path: Path) -> datetime | None:
@@ -628,6 +648,8 @@ def main() -> None:
         [] if (track_qc is not None or calibrated_objects is not None) else None
     )
 
+    video_times = load_video_times(args.video_times) if args.video_times is not None else {}
+
     all_rows: list[dict[str, Any]] = []
     skipped_missing_fps = 0
     missing_creation_dt = 0
@@ -640,7 +662,9 @@ def main() -> None:
             continue
 
         video_path = resolve_video_path(video_json=video_json, json_path=json_path, by_name=by_name, by_stem=by_stem)
-        creation_dt = ffprobe_creation_time(video_path) if video_path is not None else None
+        creation_dt = video_times.get(str(video_json.get("video_name") or json_path.stem))
+        if creation_dt is None and video_path is not None:
+            creation_dt = ffprobe_creation_time(video_path)
         if creation_dt is None:
             missing_creation_dt += 1
 

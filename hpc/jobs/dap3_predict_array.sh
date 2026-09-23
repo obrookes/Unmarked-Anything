@@ -42,7 +42,10 @@ if (( TASK_INDEX < 0 || TASK_INDEX >= JOB_COUNT )); then
 fi
 
 LINE="${JOB_LINES[$TASK_INDEX]}"
-IFS=$'\t' read -r -a F <<< "$LINE"
+# Split on tabs keeping empty fields: `IFS=$'\t' read -a` merges consecutive tabs (tab is IFS
+# whitespace), which drops an empty optional column and shifts every later one.
+F=()
+while IFS= read -r -d $'\t' field; do F+=("$field"); done <<< "$LINE"$'\t'
 
 # Manifest format columns:
 # 1  input_video_dir
