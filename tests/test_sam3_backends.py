@@ -365,6 +365,7 @@ def test_process_video_end_to_end_with_fake_backend_and_fake_da3(tmp_path: Path,
             "--sam3-model-path", "weights/sam3/model.pt",
             "--sam3-text-prompts", *prompts,
             "--da3-batch-size", "4",
+            "--depth-interval-seconds", "0",
         ]
     )
 

@@ -149,10 +149,11 @@ def resolve_video_path(video_json: dict[str, Any], json_path: Path, video_dir: P
 
 
 def group_tracks(video_json: dict[str, Any]) -> dict[Any, dict[int, dict[str, Any]]]:
-    """track_id -> {frame_index: object_entry}, only over frames with status == 'processed'."""
+    """track_id -> {frame_index: object_entry}, only over frames with status 'processed' or
+    'tracked' (SAM3-only frames off the DA3 depth grid; see dap3_cli.py --depth-interval-seconds)."""
     tracks: dict[Any, dict[int, dict[str, Any]]] = defaultdict(dict)
     for frame in video_json.get("frames") or []:
-        if frame.get("status") != "processed":
+        if frame.get("status") not in ("processed", "tracked"):
             continue
         frame_index = frame.get("frame_index")
         if not isinstance(frame_index, int):

@@ -98,11 +98,12 @@ def test_group_tracks_skips_unprocessed_frames() -> None:
         "frames": [
             {"frame_index": 0, "status": "processed", "objects": [{"track_id": 1, "bbox_xyxy": [0, 0, 1, 1]}]},
             {"frame_index": 1, "status": "sam_error", "objects": [{"track_id": 1, "bbox_xyxy": [0, 0, 1, 1]}]},
+            {"frame_index": 2, "status": "tracked", "objects": [{"track_id": 1, "bbox_xyxy": [0, 0, 1, 1]}]},
         ]
     }
     tracks = mask_verify.group_tracks(video_json)
     assert list(tracks.keys()) == [1]
-    assert list(tracks[1].keys()) == [0]
+    assert list(tracks[1].keys()) == [0, 2]
 
 
 def test_end_to_end_keep_and_reject(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

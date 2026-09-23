@@ -235,6 +235,23 @@ def extract_track_summary(sam_result: Any) -> dict[str, Any]:
     return summary
 
 
+def compute_missed_grid_frames(
+    *, sample_interval: int, depth_grid_step: int | None, frame_count_est: int
+) -> tuple[int, int]:
+    """(missed_count, total_grid_count) of depth-grid frame indices in [0, frame_count_est)
+    that are not also multiples of `sample_interval` (and so unreachable by a decoder-level
+    stride like ultralytics' `vid_stride`)."""
+    if depth_grid_step is None or frame_count_est <= 0:
+        return 0, 0
+    total = 0
+    missed = 0
+    for grid_idx in range(0, frame_count_est, depth_grid_step):
+        total += 1
+        if grid_idx % sample_interval != 0:
+            missed += 1
+    return missed, total
+
+
 def track_summary_from_object_rows(object_rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Per-frame track summary built from already-extracted object_rows (official backend)."""
     track_ids_non_null: set[int] = set()
@@ -492,6 +509,7 @@ class UltralyticsBackend:
         frame_count_est: int,
         estimated_sampled_frames: int | None,
         warnings: list[str],
+        depth_grid_step: int | None = None,
     ) -> Iterator[SamFrameResult]:
         if mode == "frame":
             yield from self._iter_frame_mode(
@@ -500,6 +518,8 @@ class UltralyticsBackend:
                 prompt_slugs=prompt_slugs,
                 sample_interval=sample_interval,
                 frame_count_est=frame_count_est,
+                warnings=warnings,
+                depth_grid_step=depth_grid_step,
             )
         else:
             yield from self._iter_track_mode(
@@ -510,6 +530,7 @@ class UltralyticsBackend:
                 frame_count_est=frame_count_est,
                 estimated_sampled_frames=estimated_sampled_frames,
                 warnings=warnings,
+                depth_grid_step=depth_grid_step,
             )
 
     def _iter_frame_mode(
@@ -520,9 +541,23 @@ class UltralyticsBackend:
         prompt_slugs: list[str],
         sample_interval: int,
         frame_count_est: int,
+        warnings: list[str],
+        depth_grid_step: int | None = None,
     ) -> Iterator[SamFrameResult]:
         if self._sam3_frame is None:
             raise RuntimeError("SAM3 frame predictor is not initialized.")
+        missed_count, total_grid_count = compute_missed_grid_frames(
+            sample_interval=sample_interval,
+            depth_grid_step=depth_grid_step,
+            frame_count_est=frame_count_est,
+        )
+        if depth_grid_step is not None and missed_count > 0:
+            warnings.append(
+                "Depth grid frames not fully covered by --target-fps sampling "
+                f"(sample_interval={sample_interval}, depth_grid_step={depth_grid_step}): "
+                f"{missed_count} of {total_grid_count} grid frame(s) in [0, {frame_count_est}) "
+                "are not multiples of sample_interval and will be skipped for depth."
+            )
         cap = cv2.VideoCapture(str(video_path))
         try:
             frame_idx = 0
@@ -595,9 +630,23 @@ class UltralyticsBackend:
         frame_count_est: int,
         estimated_sampled_frames: int | None,
         warnings: list[str],
+        depth_grid_step: int | None = None,
     ) -> Iterator[SamFrameResult]:
         if self._sam3_track is None:
             raise RuntimeError("SAM3 track predictor is not initialized.")
+
+        missed_count, total_grid_count = compute_missed_grid_frames(
+            sample_interval=sample_interval,
+            depth_grid_step=depth_grid_step,
+            frame_count_est=frame_count_est,
+        )
+        if depth_grid_step is not None and missed_count > 0:
+            warnings.append(
+                "Depth grid frames not fully covered by --target-fps sampling "
+                f"(sample_interval={sample_interval}, depth_grid_step={depth_grid_step}): "
+                f"{missed_count} of {total_grid_count} grid frame(s) in [0, {frame_count_est}) "
+                "are not multiples of sample_interval and will be skipped for depth."
+            )
 
         sam3_track = self._sam3_track
         video_stem = Path(video_path).stem
@@ -739,6 +788,81 @@ def _patch_segmentation_head_with_presence() -> None:
     mb._presence_head_patched = True
 
 
+def _patch_image_processor_scoring() -> None:
+    """Make sam3.model.sam3_image_processor.Sam3Processor._forward_grounding robust to a decoder
+    with no presence token (our SA-FARI patch above sets decoder.presence_token = None).
+
+    Ported verbatim from vision-llm-ann-generator/sam3_runner.py's `_patch_image_processor_scoring`.
+    Patches `_forward_grounding` to fall back to plain `sigmoid(pred_logits)` (no presence
+    multiplier) whenever "presence_logit_dec" is absent from the model's output dict, and prints
+    which scoring path is active (once). Idempotent.
+    """
+    from sam3.model import sam3_image_processor as sip
+
+    if getattr(sip.Sam3Processor, "_scoring_patched", False):
+        return
+
+    import torch
+    from sam3.model import box_ops
+    from sam3.model.data_misc import interpolate
+
+    @torch.inference_mode()
+    def patched(self, state):
+        outputs = self.model.forward_grounding(
+            backbone_out=state["backbone_out"],
+            find_input=self.find_stage,
+            geometric_prompt=state["geometric_prompt"],
+            find_target=None,
+        )
+
+        out_bbox = outputs["pred_boxes"]
+        out_logits = outputs["pred_logits"]
+        out_masks = outputs["pred_masks"]
+        out_probs = out_logits.sigmoid()
+        if "presence_logit_dec" in outputs:
+            presence_score = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)
+            out_probs = (out_probs * presence_score).squeeze(-1)
+            scoring_path = "sigmoid(pred_logits) * sigmoid(presence_logit_dec)"
+        else:
+            out_probs = out_probs.squeeze(-1)
+            scoring_path = (
+                "sigmoid(pred_logits) only (no presence_logit_dec in model output; "
+                "decoder presence token is patched to None for SA-FARI checkpoints)"
+            )
+        if not getattr(sip.Sam3Processor, "_scoring_path_printed", False):
+            print(f"sam3_backends: [image mode] scoring path = {scoring_path}", flush=True)
+            sip.Sam3Processor._scoring_path_printed = True
+
+        keep = out_probs > self.confidence_threshold
+        out_probs = out_probs[keep]
+        out_masks = out_masks[keep]
+        out_bbox = out_bbox[keep]
+
+        # convert to [x0, y0, x1, y1] format
+        boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
+
+        img_h = state["original_height"]
+        img_w = state["original_width"]
+        scale_fct = torch.tensor([img_w, img_h, img_w, img_h]).to(self.device)
+        boxes = boxes * scale_fct[None, :]
+
+        out_masks = interpolate(
+            out_masks.unsqueeze(1),
+            (img_h, img_w),
+            mode="bilinear",
+            align_corners=False,
+        ).sigmoid()
+
+        state["masks_logits"] = out_masks
+        state["masks"] = out_masks > 0.5
+        state["boxes"] = boxes
+        state["scores"] = out_probs
+        return state
+
+    sip.Sam3Processor._forward_grounding = patched
+    sip.Sam3Processor._scoring_patched = True
+
+
 def _to_numpy(x):
     if hasattr(x, "cpu"):  # torch tensor (may be bf16 under autocast; numpy has no bf16)
         if hasattr(x, "is_floating_point") and x.is_floating_point():
@@ -855,6 +979,7 @@ class OfficialSam3Backend:
         frame_count_est: int,
         estimated_sampled_frames: int | None,
         warnings: list[str],
+        depth_grid_step: int | None = None,
     ) -> Iterator[SamFrameResult]:
         if mode != "track":
             raise NotImplementedError(
@@ -873,7 +998,8 @@ class OfficialSam3Backend:
                 ret, frame_bgr = cap.read()
                 if not ret:
                     break
-                if frame_idx % sample_interval == 0:
+                is_grid_frame = depth_grid_step is not None and frame_idx % depth_grid_step == 0
+                if frame_idx % sample_interval == 0 or is_grid_frame:
                     frame_indices.append(frame_idx)
                     frames_bgr.append(frame_bgr)
                 frame_idx += 1
@@ -983,3 +1109,105 @@ class OfficialSam3Backend:
                 status=None,
                 error=None,
             )
+
+
+class OfficialSam3ImageSegmenter:
+    """Official facebookresearch/sam3 single-image inference (no cross-frame tracking).
+
+    Unlike `OfficialSam3Backend` (video predictor, track mode, per-video session state), this
+    runs sam3's image detector (`build_sam3_image_model` + `sam3.model.sam3_image_processor.
+    Sam3Processor`) independently on one frame at a time - no track ids, no propagation. Intended
+    for the calibration builder, which needs single-frame SAM3 segmentation. Ported from
+    vision-llm-ann-generator/sam3_runner.py's `Sam3Runner._load_image_model`/`_track_image`.
+
+    The model + processor are lazily loaded once (on the first `segment_image` call) and cached
+    on the instance.
+    """
+
+    def __init__(
+        self,
+        *,
+        sam3_model_path: str,
+        device: str = "cuda",
+        confidence_threshold: float | None = None,
+    ) -> None:
+        self.sam3_model_path = sam3_model_path
+        self.device = device
+        self.confidence_threshold = confidence_threshold
+        self._model: Any = None
+        self._processor: Any = None
+
+    def _load_image_model(self) -> tuple[Any, Any]:
+        if self._model is not None:
+            return self._model, self._processor
+        from sam3.model_builder import build_sam3_image_model
+        from sam3.model.sam3_image_processor import Sam3Processor
+
+        variant = _checkpoint_variant(self.sam3_model_path)
+        kwargs: dict[str, Any] = dict(
+            checkpoint_path=self.sam3_model_path,
+            device=self.device,
+            load_from_HF=False,
+            enable_inst_interactivity=False,
+        )
+        if variant == "seg_head_presence":
+            _patch_segmentation_head_with_presence()
+        _patch_image_processor_scoring()
+        print(f"OfficialSam3ImageSegmenter: checkpoint variant={variant} kwargs={kwargs}", flush=True)
+        model = build_sam3_image_model(**kwargs)
+        processor = Sam3Processor(model, device=self.device)
+        if self.confidence_threshold is not None:
+            processor.set_confidence_threshold(self.confidence_threshold)
+        self._model = model
+        self._processor = processor
+        return model, processor
+
+    def segment_image(
+        self, frame_bgr: np.ndarray, prompt: str
+    ) -> list[tuple[np.ndarray, float, list[float]]]:
+        """Run single-image SAM3 text-prompted segmentation on one frame.
+
+        Public entry point for single-image (no cross-frame tracking/track-ids - unlike
+        `OfficialSam3Backend`'s track mode) SAM3 inference, intended for the calibration builder.
+        The model+processor are lazily loaded once and cached on this instance.
+
+        Args:
+            frame_bgr: one frame, BGR, shape (H, W, 3).
+            prompt: text prompt.
+
+        Returns:
+            list of (mask_bool_HxW, score, box_xyxy) tuples, one per detection:
+              - mask_bool_HxW: bool numpy array shaped (H, W) matching frame_bgr's height/width.
+              - score: float.
+              - box_xyxy: list[float] of length 4, ORIGINAL pixel coordinates (not normalized).
+        """
+        from PIL import Image
+
+        _, processor = self._load_image_model()
+
+        pil = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+
+        if self.device.startswith("cuda"):
+            import torch
+
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                state = processor.set_image(pil)
+                state = processor.set_text_prompt(prompt=prompt, state=state)
+        else:
+            state = processor.set_image(pil)
+            state = processor.set_text_prompt(prompt=prompt, state=state)
+
+        boxes_xyxy = _to_numpy(state["boxes"])  # xyxy, ORIGINAL pixels
+        masks = _to_numpy(state["masks"])  # bool, (N, H, W) or (N, 1, H, W)
+        scores = _to_list(state["scores"])
+
+        if masks.ndim == 4:  # (N, 1, H, W) -> (N, H, W)
+            masks = masks[:, 0]
+
+        results: list[tuple[np.ndarray, float, list[float]]] = []
+        for i in range(masks.shape[0]):
+            mask_bool = masks[i].astype(bool)
+            score = float(scores[i]) if i < len(scores) else 0.0
+            box = [float(v) for v in boxes_xyxy[i].tolist()] if i < len(boxes_xyxy) else [0.0, 0.0, 0.0, 0.0]
+            results.append((mask_bool, score, box))
+        return results
