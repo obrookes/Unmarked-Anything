@@ -96,6 +96,14 @@ echo "CALIB_DIR: $CALIB_DIR"
 echo "OUT_DIR: $OUT_DIR"
 echo "Command: ${CMD[*]}"
 
+# Only $HOME is mounted into containers by default here; bind the shared filesystems too, so video,
+# output and cache paths under /scratch, /projects or /lus resolve inside the container.
+if [[ -z "${APPTAINER_BIND:-}" ]]; then
+  APPTAINER_BIND=""
+  for _p in /lus /scratch /projects /local; do [[ -d "$_p" ]] && APPTAINER_BIND+="${APPTAINER_BIND:+,}$_p"; done
+  export APPTAINER_BIND
+fi
+
 if [[ -n "$CONTAINER" ]]; then
   apptainer exec \
     --env HF_HUB_OFFLINE=1 --env TMPDIR=/tmp \

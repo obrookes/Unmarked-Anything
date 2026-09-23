@@ -131,7 +131,8 @@ class VLMEngine:
                 prompts.append({"prompt": prompt, "multi_modal_data": {"image": images}})
 
                 sp_kwargs: dict[str, Any] = dict(max_tokens=max_tokens, seed=0)
-                sp_kwargs.update(self.spec.sampling if not self.thinking else {"temperature": 1.0, "top_p": 0.95})
+                qwen_thinking = self.thinking and self.spec.family != "glm5_next"
+                sp_kwargs.update({"temperature": 1.0, "top_p": 0.95} if qwen_thinking else self.spec.sampling)
                 if req_schema is not None:
                     sp_kwargs.update(_structured_output_kwarg(req_schema))
                 sampling.append(SamplingParams(**sp_kwargs))

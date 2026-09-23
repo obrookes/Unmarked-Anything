@@ -65,6 +65,7 @@ DAP3_CONDA_ENV="${DAP3_CONDA_ENV:-dap3-stream}"
 VLM_CONTAINER="${VLM_CONTAINER:-}"
 VLM_CONDA_ENV="${VLM_CONDA_ENV:-}"
 VLM_MODEL="${VLM_MODEL:-qwen}"
+VLM_GPUS="${VLM_GPUS:-1}"  # GPUs per VLM task; also the vLLM tensor-parallel size (glm needs 4)
 R_CONDA_ENV="${R_CONDA_ENV:-}"
 R_MODULE="${R_MODULE:-}"
 HF_HOME="${HF_HOME:-}"
@@ -174,11 +175,11 @@ if [[ "$SKIP_SIGNS" == "1" ]]; then
   echo "[A] SKIP_SIGNS=1 -- skipping find_sign_frames scan."
 else
   echo "[A] Submitting find_sign_frames array..."
-  export_vars="ALL,REPO_ROOT=$REPO_ROOT,OUT_DIR=$OUT_ROOT/sign_frames,REFERENCE_MAP=$REFERENCE_MAP,REFERENCE_ROOT=$REFERENCE_ROOT,MODEL=$VLM_MODEL,SCAN_FPS=$SCAN_FPS,NUM_SHARDS=$FIND_SIGN_NUM_SHARDS"
+  export_vars="ALL,REPO_ROOT=$REPO_ROOT,OUT_DIR=$OUT_ROOT/sign_frames,REFERENCE_MAP=$REFERENCE_MAP,REFERENCE_ROOT=$REFERENCE_ROOT,MODEL=$VLM_MODEL,TP=$VLM_GPUS,SCAN_FPS=$SCAN_FPS,NUM_SHARDS=$FIND_SIGN_NUM_SHARDS"
   [[ -n "$VLM_CONTAINER" ]] && export_vars="$export_vars,CONTAINER=$VLM_CONTAINER"
   [[ -n "$VLM_CONDA_ENV" ]] && export_vars="$export_vars,CONDA_ENV=$VLM_CONDA_ENV"
   [[ -n "$HF_HOME" ]] && export_vars="$export_vars,HF_HOME=$HF_HOME"
-  JOB_ID_A="$(submit_job_id sbatch "${sbatch_extra_args[@]}" --job-name=find_sign_frames \
+  JOB_ID_A="$(submit_job_id sbatch "${sbatch_extra_args[@]}" --job-name=find_sign_frames --gres="gpu:$VLM_GPUS" \
     --array="0-$((FIND_SIGN_NUM_SHARDS - 1))" --export="$export_vars" \
     "$REPO_ROOT/hpc/jobs/find_sign_frames.sh")"
   echo "  job id: ${JOB_ID_A:-<dry-run>}"
@@ -193,7 +194,7 @@ else
   echo "[A'] Submitting find_sign_frames build-only merge (dependency on A)..."
   dep_args=()
   [[ -n "$JOB_ID_A" ]] && dep_args+=(--dependency="afterok:$JOB_ID_A")
-  export_vars="ALL,REPO_ROOT=$REPO_ROOT,OUT_DIR=$OUT_ROOT/sign_frames,REFERENCE_MAP=$REFERENCE_MAP,REFERENCE_ROOT=$REFERENCE_ROOT,MODEL=$VLM_MODEL,SCAN_FPS=$SCAN_FPS,BUILD_ONLY=1"
+  export_vars="ALL,REPO_ROOT=$REPO_ROOT,OUT_DIR=$OUT_ROOT/sign_frames,REFERENCE_MAP=$REFERENCE_MAP,REFERENCE_ROOT=$REFERENCE_ROOT,MODEL=$VLM_MODEL,TP=$VLM_GPUS,SCAN_FPS=$SCAN_FPS,BUILD_ONLY=1"
   [[ -n "$VLM_CONTAINER" ]] && export_vars="$export_vars,CONTAINER=$VLM_CONTAINER"
   [[ -n "$VLM_CONDA_ENV" ]] && export_vars="$export_vars,CONDA_ENV=$VLM_CONDA_ENV"
   [[ -n "$HF_HOME" ]] && export_vars="$export_vars,HF_HOME=$HF_HOME"
@@ -233,6 +234,7 @@ else
   export_vars="ALL,REPO_ROOT=$REPO_ROOT,MANIFEST=$MAIN_MANIFEST,OUTPUT_ROOT=$OUT_ROOT/main,WRITE_NPZ=1,SAM3_BACKEND=$SAM3_BACKEND,SAM3_DET_THRESHOLD=$SAM3_DET_THRESHOLD,DEPTH_INTERVAL_SECONDS=$DEPTH_INTERVAL_S"
   [[ -n "$DAP3_SAM3_CONTAINER" ]] && export_vars="$export_vars,CONTAINER=$DAP3_SAM3_CONTAINER"
   [[ -n "$DAP3_CONDA_ENV" ]] && export_vars="$export_vars,CONDA_ENV=$DAP3_CONDA_ENV"
+  [[ -n "$HF_HOME" ]] && export_vars="$export_vars,HF_HOME=$HF_HOME"
   JOB_ID_C="$(submit_job_id sbatch "${sbatch_extra_args[@]}" --job-name=dap3_main --array=1-1 \
     --export="$export_vars" "$REPO_ROOT/hpc/jobs/dap3_predict_array.sh")"
   if [[ -n "$JOB_ID_C" ]]; then
@@ -252,11 +254,11 @@ else
   dep_args=()
   [[ -n "$JOB_ID_C" ]] && dep_args+=(--dependency="afterok:$JOB_ID_C")
   QC_OUT_DIR="$MAIN_JOB_DIR/qc"
-  export_vars="ALL,REPO_ROOT=$REPO_ROOT,JOB_DIR=$MAIN_JOB_DIR,OUT_DIR=$QC_OUT_DIR,MODEL=$VLM_MODEL,NUM_SHARDS=$MASK_VERIFY_NUM_SHARDS"
+  export_vars="ALL,REPO_ROOT=$REPO_ROOT,JOB_DIR=$MAIN_JOB_DIR,OUT_DIR=$QC_OUT_DIR,MODEL=$VLM_MODEL,TP=$VLM_GPUS,NUM_SHARDS=$MASK_VERIFY_NUM_SHARDS"
   [[ -n "$VLM_CONTAINER" ]] && export_vars="$export_vars,CONTAINER=$VLM_CONTAINER"
   [[ -n "$VLM_CONDA_ENV" ]] && export_vars="$export_vars,CONDA_ENV=$VLM_CONDA_ENV"
   [[ -n "$HF_HOME" ]] && export_vars="$export_vars,HF_HOME=$HF_HOME"
-  JOB_ID_D="$(submit_job_id sbatch "${sbatch_extra_args[@]}" "${dep_args[@]}" --job-name=mask_verify_array \
+  JOB_ID_D="$(submit_job_id sbatch "${sbatch_extra_args[@]}" "${dep_args[@]}" --job-name=mask_verify_array --gres="gpu:$VLM_GPUS" \
     --array="0-$((MASK_VERIFY_NUM_SHARDS - 1))" --export="$export_vars" \
     "$REPO_ROOT/hpc/jobs/mask_verify_array.sh")"
   echo "  job id: ${JOB_ID_D:-<dry-run>}"

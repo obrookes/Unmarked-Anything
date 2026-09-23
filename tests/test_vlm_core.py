@@ -98,3 +98,19 @@ def test_fake_engine_run_json_callable() -> None:
     reqs = [VLMRequest(images=[], prompt="hello")]
     results = engine.run_json(reqs)
     assert results == [{"prompt": "hello"}]
+
+
+class _EchoTokenizer:
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, **kw):
+        assert "enable_thinking" not in kw
+        return "<|user|>...<|assistant|><think>"
+
+
+def test_models_resolve_glm_and_prompt_closes_think_block() -> None:
+    spec = models.resolve("glm")
+    assert spec.model_id == "zai-org/GLM-5.3-Flash"
+    assert spec.tensor_parallel == 4
+    assert spec.family == "glm5_next"
+    assert models.resolve("zai-org/GLM-5.3-Flash") is spec
+    assert spec.render_prompt(_EchoTokenizer(), "p").endswith("<think></think>")
+    assert spec.render_prompt(_EchoTokenizer(), "p", think=True).endswith("<think>")

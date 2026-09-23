@@ -86,6 +86,20 @@ echo "Command: ${CMD[*]}"
 
 cd "$REPO_ROOT"
 
+# Only $HOME is mounted into containers by default here; bind the shared filesystems too, so video,
+# output and cache paths under /scratch, /projects or /lus resolve inside the container.
+if [[ -z "${APPTAINER_BIND:-}" ]]; then
+  APPTAINER_BIND=""
+  for _p in /lus /scratch /projects /local; do [[ -d "$_p" ]] && APPTAINER_BIND+="${APPTAINER_BIND:+,}$_p"; done
+  export APPTAINER_BIND
+fi
+# vLLM runtime env for the GLM-5.3-Flash FP8 container (mirrors vision-llm-ann-verifier's run_vllm.sh):
+# DeepGEMM's FP8 JIT needs nvcc (absent in the container) and JIT caches would otherwise land in ~/.cache.
+export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
+export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-$SCRATCH/vllm-cache}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$SCRATCH/triton-cache}"
+export FLASHINFER_WORKSPACE_BASE="${FLASHINFER_WORKSPACE_BASE:-$SCRATCH/flashinfer-cache}"
+
 if [[ -n "$CONTAINER" ]]; then
   apptainer exec --nv \
     --env HF_HUB_OFFLINE=1 --env "HF_HOME=$HF_HOME" --env TMPDIR=/tmp \
