@@ -601,7 +601,9 @@ def _fit_and_fallback(
     insample_errs_near = []
     pred_depth_insample: dict[int, float] = {}
     for i in valid_idx:
-        pred_depth = float(1.0 / curve(np.array([_fit_x(rows[i])]))[0])
+        pred_depth = float(
+            timmh.depth_from_disparity(curve(np.array([_fit_x(rows[i])])), min_depth, max_depth)[0]
+        )
         pred_depth_insample[i] = pred_depth
         if rows[i]["distance_m"] <= loo_max_distance:
             insample_errs_near.append(abs(pred_depth - rows[i]["distance_m"]))
@@ -616,7 +618,9 @@ def _fit_and_fallback(
         if len(remaining_dists) < 2:
             continue
         loo_curve, _ = fit_curve(remaining)
-        pred_depth = float(1.0 / loo_curve(np.array([_fit_x(rows[i])]))[0])
+        pred_depth = float(
+            timmh.depth_from_disparity(loo_curve(np.array([_fit_x(rows[i])])), min_depth, max_depth)[0]
+        )
         err = abs(pred_depth - rows[i]["distance_m"])
         loo_errs_all.append(err)
         if rows[i]["distance_m"] <= loo_max_distance:
@@ -1275,7 +1279,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--min-depth", type=float, default=1.0)
     p.add_argument("--max-depth", type=float, default=25.0)
     p.add_argument("--only-cams", default=None, help="Comma-separated transect_cam allowlist.")
-    p.add_argument("--overwrite", action="store_true")
+    p.add_argument(
+        "--overwrite", action="store_true",
+        help="Recompute calibration for cameras whose npz already exists in --out-dir/calib "
+             "(otherwise they're skipped, even if --calibration-frames or other parameters "
+             "changed; a warning listing skipped cameras is printed at the end).",
+    )
     p.add_argument(
         "--size-tolerance", type=float, default=2.0,
         help="Reject instances whose k=distance*sqrt(mask_area) deviates from the camera's "
@@ -1342,11 +1351,13 @@ def main(argv: list[str] | None = None) -> None:
 
     all_instance_rows: list[dict[str, Any]] = read_instance_rows(instances_csv)
     pending_camera_npz: dict[str, tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]] = {}
+    skipped_existing: list[str] = []
 
     for transect_cam, cam_events in sorted(by_cam.items()):
         npz_path = calib_dir / f"{transect_cam}.npz"
         if npz_path.exists() and not args.overwrite:
             print(f"[{transect_cam}] skipping (npz exists): {npz_path}")
+            skipped_existing.append(transect_cam)
             continue
 
         if segmenter is None:
@@ -1410,6 +1421,12 @@ def main(argv: list[str] | None = None) -> None:
 
     write_summary_csv(args.out_dir / "calibration_summary.csv", summary_rows)
     print(f"wrote calibration for {len(summary_rows)} cameras to {args.out_dir}")
+    if skipped_existing:
+        shown = ", ".join(skipped_existing[:10])
+        print(
+            f"WARNING: skipped {len(skipped_existing)} cameras with existing calibration NPZs "
+            f"(use --overwrite to recompute): {shown} (first 10)"
+        )
 
 
 if __name__ == "__main__":
