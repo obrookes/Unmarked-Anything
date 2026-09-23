@@ -234,7 +234,32 @@ def test_loo_mae_over_threshold_falls_back_to_pooled():
     assert summary["knots_x"] is None and summary["knots_y"] is None
 
 
-def test_non_monotone_curve_falls_back():
+def test_isotonic_pava_recovers_from_noisy_far_reversal():
+    # A clean x ~= 1/distance relationship except a small reversal between two nearby far
+    # distances (10 m, 11 m) -- the kind of measurement noise expected when disparity is nearly
+    # flat out there (x should fall monotonically with distance; here it briefly rises). The
+    # isotonic PAVA step must pool that one violating pair (n_isotonic_pooled == 1) into a single
+    # knot rather than rejecting the whole camera as non-monotone.
+    x_by_dist = {
+        1.0: 1.000, 2.0: 0.500, 3.0: 0.333, 4.0: 0.250, 5.0: 0.200,
+        10.0: 0.095, 11.0: 0.100, 12.0: 0.083,
+    }
+    rows = [
+        {"distance_m": d, "mask_area_px": 1000.0, "x_aligned": x, "x_raw": x, "video": "v"}
+        for d, x in x_by_dist.items()
+    ]
+    rows_out, summary = br.calibrate_camera_from_rows(
+        rows, size_tolerance=1e6, align_tolerance=1e6, disp_tolerance=1e6
+    )
+    assert summary["method"] == "per_camera"
+    assert summary["n_isotonic_pooled"] == 1
+    assert summary["loo_mae_m"] is not None and summary["loo_mae_m"] < 3.0
+
+
+def test_isotonic_collapse_falls_back_too_few_distances():
+    # 3 distinct distances is the bare minimum; if isotonic pooling merges them all the way down
+    # to <3 knots the camera must still fall back (sanity net for a degenerate case), with the new
+    # reason string (non_monotone is no longer used at all).
     rows = [
         {"distance_m": 3.0, "mask_area_px": 1000.0, "x_aligned": 0.15, "x_raw": 0.15, "video": "v"},
         {"distance_m": 6.0, "mask_area_px": 250.0, "x_aligned": 0.35, "x_raw": 0.35, "video": "v"},
@@ -244,7 +269,87 @@ def test_non_monotone_curve_falls_back():
         rows, size_tolerance=1e6, align_tolerance=1e6, disp_tolerance=1e6
     )
     assert summary["method"] == "pooled"
-    assert "non_monotone" in summary["fallback_reason"]
+    assert "too_few_distances_after_isotonic" in summary["fallback_reason"]
+    assert "non_monotone" not in summary["fallback_reason"]
+
+
+def test_loo_truncated_to_near_distances_by_default():
+    # Near points (<=12 m, the CTDS-truncation default) exactly follow x = 1/distance; one 20 m
+    # point is deliberately inconsistent with that relationship (its own held-out LOO prediction,
+    # extrapolated from the near curve, is wildly off) but must not blow up the gated loo_mae_m
+    # since --loo-max-distance defaults to 12.0 m.
+    near = {2.0: 0.5, 4.0: 0.25, 6.0: 1 / 6, 8.0: 0.125, 10.0: 0.1, 12.0: 1 / 12}
+    rows = [
+        {"distance_m": d, "mask_area_px": 1000.0, "x_aligned": x, "x_raw": x, "video": "v"}
+        for d, x in near.items()
+    ]
+    rows.append({"distance_m": 20.0, "mask_area_px": 1000.0, "x_aligned": 0.02, "x_raw": 0.02, "video": "v"})
+
+    rows_out, summary = br.calibrate_camera_from_rows(
+        rows, size_tolerance=1e6, align_tolerance=1e6, disp_tolerance=1e6
+    )
+    assert summary["method"] == "per_camera"
+    assert summary["loo_mae_m"] is not None and summary["loo_mae_m"] < 3.0
+    assert summary["loo_mae_all_m"] is not None and summary["loo_mae_all_m"] > summary["loo_mae_m"]
+
+
+def test_align_tolerance_default_keeps_near_frames_with_proximity_scale_drift():
+    # DA3's per-frame alignment scale genuinely shifts when a near person fills the frame: model
+    # that as x_aligned/x_raw = 1.7 for near frames (2-3 m) vs. 1.0 for far frames (6-14 m), all
+    # sharing one video/camera group. The underlying x_aligned itself still cleanly follows
+    # x = 1/distance (a good, fittable curve) -- only the alignment-consistency ratio differs.
+    ratio_by_dist = {2.0: 1.7, 3.0: 1.7, 6.0: 1.0, 8.0: 1.0, 10.0: 1.0, 12.0: 1.0, 14.0: 1.0}
+    rows = [
+        {
+            "distance_m": d, "mask_area_px": 1000.0,
+            "x_aligned": 1.0 / d, "x_raw": (1.0 / d) / ratio, "video": "v",
+        }
+        for d, ratio in ratio_by_dist.items()
+    ]
+
+    # Default --align-tolerance (3.0): near frames' r = log(1.7) deviates from the far-dominated
+    # group median (log(1.0) = 0) by log(1.7) ~= 0.53, well under log(3.0) ~= 1.10 -- kept.
+    rows_default, summary_default = br.calibrate_camera_from_rows(
+        [dict(r) for r in rows], size_tolerance=1e6, disp_tolerance=1e6,
+    )
+    near_default = [r for r in rows_default if r["distance_m"] in (2.0, 3.0)]
+    assert all(r["status"] == "ok" for r in near_default)
+    assert summary_default["method"] == "per_camera"
+
+    # The OLD default (1.5): log(1.7) ~= 0.53 > log(1.5) ~= 0.41 -- near frames get rejected.
+    rows_old, _ = br.calibrate_camera_from_rows(
+        [dict(r) for r in rows], size_tolerance=1e6, disp_tolerance=1e6, align_tolerance=1.5,
+    )
+    near_old = [r for r in rows_old if r["distance_m"] in (2.0, 3.0)]
+    assert all(r["status"] == "align_inconsistent" for r in near_old)
+
+
+def test_video_scale_normalization_recovers_per_video_factors():
+    # 3 videos on one camera, all sharing the same true x = 1/distance relationship, but each
+    # video's x_aligned carries a different residual multiplicative scale (a_v): the reference
+    # video (most distinct distances -> video "ref") at 1.0, "lo" at 0.7, "hi" at 1.3.
+    scale_by_video = {"ref": 1.0, "lo": 0.7, "hi": 1.3}
+    dists_by_video = {"ref": [2.0, 4.0, 6.0, 8.0, 10.0], "lo": [2.0, 4.0, 6.0], "hi": [4.0, 6.0, 8.0]}
+    rows = []
+    for video, dists in dists_by_video.items():
+        a_v = scale_by_video[video]
+        for d in dists:
+            x = a_v / d
+            rows.append({
+                "distance_m": d, "mask_area_px": 1000.0, "x_aligned": x, "x_raw": x, "video": video,
+            })
+
+    rows_out, summary = br.calibrate_camera_from_rows(
+        rows, size_tolerance=1e6, align_tolerance=1e6, disp_tolerance=1e6,
+    )
+
+    assert all(r["status"] == "ok" for r in rows_out)
+    assert summary["method"] == "per_camera"
+    assert summary["n_videos_scaled"] == 2
+
+    recovered = {r["video"]: r["video_scale"] for r in rows_out}
+    for video, true_scale in scale_by_video.items():
+        assert recovered[video] == pytest.approx(true_scale, rel=0.05)
 
 
 def test_pooled_excludes_size_and_disp_inconsistent_rows():
@@ -495,54 +600,84 @@ def test_cli_resume_skips_existing_camera_npz(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------------------
-# regression test against a real Isambard smoke-run instances CSV (no disparity maps recorded,
-# so this exercises `calibrate_camera_from_rows`, the pure filter+fit layer, directly on the
-# fixture's already-computed distance_m/mask_area_px/x_aligned/x_raw/video columns).
+# regression tests against real Isambard-run instances CSVs (no disparity maps recorded, so this
+# exercises `calibrate_camera_from_rows`, the pure filter+fit layer, directly on each fixture's
+# already-computed distance_m/mask_area_px/x_aligned/x_raw columns; 'video' is derived from
+# event_id's "<video>_<event>" prefix). Parametrised over fixture files so another CSV of
+# real-world cameras can be dropped in later by adding one FIXTURE_EXPECTATIONS entry.
 # --------------------------------------------------------------------------------------
 
-def _load_smoke_fixture_rows() -> dict[str, list[dict]]:
-    fixture_path = REPO_ROOT / "tests" / "fixtures" / "calibration_instances_smoke.csv"
+def _load_fixture_rows(fixture_name: str) -> dict[str, list[dict]]:
+    fixture_path = REPO_ROOT / "tests" / "fixtures" / fixture_name
     by_cam: dict[str, list[dict]] = {}
     with fixture_path.open(newline="") as f:
         for r in csv.DictReader(f):
-            if r["status"] != "ok":
+            # A missing/NaN x_aligned means the instance was never aligned (e.g. dropped by the
+            # old run's size filter before alignment even ran) -- unusable here regardless of the
+            # old run's recorded status.
+            raw = r.get("x_aligned", "")
+            if raw in ("", "nan"):
                 continue
+            x_aligned = float(raw)
+            if not np.isfinite(x_aligned):
+                continue
+            x_raw_raw = r.get("x_raw", "")
+            x_raw = float(x_raw_raw) if x_raw_raw not in ("", "nan") else float("nan")
             by_cam.setdefault(r["transect_cam"], []).append({
                 "distance_m": float(r["distance_m"]),
-                "mask_area_px": float(r["mask_area_px"]),
-                "x_aligned": float(r["x_aligned"]),
-                "x_raw": float(r["x_raw"]),
+                "mask_area_px": float(r["mask_area_px"]) if r.get("mask_area_px") not in ("", None) else None,
+                "x_aligned": x_aligned,
+                "x_raw": x_raw,
                 "video": r["event_id"].split("_")[0],
             })
     return by_cam
 
 
-def test_smoke_fixture_recovers_good_calibration_for_all_cameras():
-    by_cam = _load_smoke_fixture_rows()
-    good_cams = {"124_cam106", "15_cam126", "25_cam076"}
-    formerly_broken_cams = {"182_cam068", "3_cam006"}
-    assert set(by_cam) == good_cams | formerly_broken_cams
+# Per fixture, per camera: {} means "no specific expectation beyond the global invariants below
+# (still per_camera => loo_mae_m < 3.0)"; {"method": ...} pins the exact outcome.
+FIXTURE_EXPECTATIONS: dict[str, dict[str, dict]] = {
+    "calibration_instances_smoke.csv": {
+        "124_cam106": {"method": "per_camera"},
+        "15_cam126": {"method": "per_camera"},
+        "25_cam076": {"method": "per_camera"},
+        "182_cam068": {},  # formerly broken; per_camera (validated) or pooled both acceptable
+        "3_cam006": {},
+    },
+    "calibration_instances_fallback.csv": {
+        # Clean 1->12 m and 14->1 m walks; must now recover as per_camera.
+        "86_cam145": {"method": "per_camera"},
+        "102_cam014": {},
+        "103_cam008": {},
+        "135_cam025": {},
+        "137_cam123": {},
+        "59_cam129": {},
+        "75_cam093": {},
+    },
+}
+
+
+@pytest.mark.parametrize("fixture_name", sorted(FIXTURE_EXPECTATIONS))
+def test_fixture_recovers_expected_calibration(fixture_name):
+    by_cam = _load_fixture_rows(fixture_name)
+    expected = FIXTURE_EXPECTATIONS[fixture_name]
+    assert set(by_cam) == set(expected)
 
     results = {}
     for cam, rows in by_cam.items():
         _, summary = br.calibrate_camera_from_rows(rows)
         results[cam] = summary
-        print(f"{cam}: method={summary['method']} loo_mae_m={summary['loo_mae_m']}")
+        print(
+            f"{fixture_name} {cam}: method={summary['method']} loo_mae_m={summary['loo_mae_m']} "
+            f"fallback_reason={summary['fallback_reason']!r}"
+        )
 
-    for cam in good_cams:
-        s = results[cam]
-        assert s["method"] == "per_camera"
-        assert s["loo_mae_m"] is not None and s["loo_mae_m"] < 3.0
-
-    for cam in formerly_broken_cams:
-        s = results[cam]
+    for cam, s in results.items():
+        # Global invariant: nothing may end up per_camera with a blown-up (or unmeasured) LOO MAE.
         if s["method"] == "per_camera":
             assert s["loo_mae_m"] is not None and np.isfinite(s["loo_mae_m"]) and s["loo_mae_m"] < 3.0
         else:
-            assert s["method"] == "pooled"
             assert s["fallback_reason"] != ""
 
-    # No camera may end up per_camera with a blown-up (or unmeasured) LOO MAE.
-    for cam, s in results.items():
-        if s["method"] == "per_camera":
-            assert s["loo_mae_m"] is not None and np.isfinite(s["loo_mae_m"]) and s["loo_mae_m"] < 3.0
+        want = expected[cam].get("method")
+        if want is not None:
+            assert s["method"] == want, f"{cam}: expected method={want!r}, got {s['method']!r}"

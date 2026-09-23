@@ -24,22 +24,58 @@ produces an outlier that can wreck the whole curve), three consistency checks ru
     within the same camera+video (same DA3/alignment behaviour). Instances whose r deviates from
     that group's median by more than log(--align-tolerance) are dropped (status
     "align_inconsistent"); only applied to video groups with >=3 size-consistent, aligned
-    survivors.
+    survivors. --align-tolerance defaults to 3.0 (not 1.5): DA3's per-frame scale genuinely shifts
+    when a near person fills the frame, and removing that shift is exactly what alignment is for,
+    so a tight tolerance rejects the near (most informative) frames as "inconsistent" when they
+    aren't. 3.0 only catches gross alignment failures (observed ratios 5-10x the video median).
   - disparity consistency: a RANSAC line x_aligned ~ m*(1/distance) + c is fit on the surviving
     instances (requires >=4 survivors, >=3 distinct distances); instances whose implied distance
     is off by more than --disp-tolerance x are dropped (status "disp_inconsistent").
 The alignment anchor is chosen as the size-consistent instance with the SMALLEST mask_area_px
-(hides the least background), ties -> highest vlm_conf; if that anchor is itself flagged
-align_inconsistent or disp_inconsistent, the next-smallest-area survivor is tried once more as
-anchor.
+WITHIN the camera's reference video (see below), ties -> highest vlm_conf; if that anchor is
+itself flagged align_inconsistent or disp_inconsistent, the next-smallest-area survivor (still in
+the reference video) is tried once more as anchor.
+
+Between alignment and the disparity-consistency filter, per-video disparity-scale normalization
+(`--no-video-scale` to disable) corrects a per-video multiplicative residual that single-anchor
+alignment can leave behind (e.g. different reference videos shot in different light): the
+"reference video" is the video with the most distinct distance_m values among the camera's
+size-consistent instances (ties -> most instances; a_ref = 1 by construction, so the curve and
+saved anchor stay in that video's scale); a robust log-log regression log(x_aligned) = log(a_v) +
+b0 + b1*log(distance_m), common slope, per-video intercept, fit with a few rounds of
+trim-beyond-2.5x-MAD, gives each OTHER video (with >=3 survivors spanning >=2 distinct distances;
+otherwise a_v=1) its own scale factor a_v. Every downstream step (disparity-consistency filter,
+isotonic pooling, curve fit, LOO) uses x_fit = x_aligned / a_v in place of x_aligned.
+`calibration_instances.csv` records each instance's `video_scale` (a_v); the summary records
+`n_videos_scaled` and `video_scale_range` (min;max a_v actually used, always including the
+reference video's 1.0).
+
+The per-distance-median curve is fit in disparity space after pooling the (distance, median
+x_fit) points through a weighted isotonic regression (pool-adjacent-violators, PAVA) so that
+x is non-increasing in distance_m (disparity must fall as distance grows); this replaces rejecting
+the camera outright for a non-monotone curve, since at far distances (10-16 m) disparity is nearly
+flat and noise alone can reverse the per-distance medians. Weights are each level's instance
+count; adjacent levels are merged whenever their pooled average ties or inverts, which also
+guarantees the resulting knots have strictly distinct x (see `_pava_weighted_nonincreasing` /
+`_isotonic_pool_by_distance`). `n_isotonic_pooled` in the summary counts how many of the original
+distinct distance levels got absorbed into a merge (0 if the raw per-distance medians were already
+monotone).
+
 A camera only uses "per_camera" (instead of falling back to "pooled_anchor", same knot-borrowing
-as the pooled case) when it has >=3 distinct valid distances remaining AND a finite,
-cross-validated leave-one-out MAE (loo_mae_m) that is <= --max-loo-mae -- an unvalidated 2-point
-fit is never trusted, since a single VLM misread surviving the filters above can otherwise still
-pin the curve. It also falls back if the per-distance-median curve isn't (near-)monotone, or
-evaluating it over the [--min-depth, --max-depth] inverse-distance range gives non-finite output.
+as the pooled case) when it has >=3 distinct valid distances remaining AND, after isotonic
+pooling, still >=3 distinct knots AND a finite, cross-validated leave-one-out MAE (loo_mae_m) that
+is <= --max-loo-mae -- an unvalidated 2-point fit is never trusted, since a single VLM misread
+surviving the filters above can otherwise still pin the curve. It also falls back if evaluating
+the curve over the [--min-depth, --max-depth] inverse-distance range gives non-finite output.
+Both loo_mae_m and the in-sample MAE used for this gate are computed only over instances with
+distance_m <= --loo-max-distance (default 12.0 m, matching CTDS's right-truncation) -- all
+instances are still used to fit the curve, but far-distance disparity is nearly flat, so small
+disparity noise there produces large implied-distance errors that don't reflect calibration
+quality where it matters. `loo_mae_all_m` (over all distances, diagnostic only, not gated on) is
+also recorded. If fewer than 2 instances are <= --loo-max-distance, loo_mae_m can't be validated
+and the camera falls back with reason "loo_unavailable".
 `calibration_summary.csv`'s `fallback_reason` records why ("too_few_distances", "loo_unavailable",
-"loo_mae>X", "non_monotone", "non_finite_over_range", any combination).
+"loo_mae>X", "too_few_distances_after_isotonic", "non_finite_over_range", any combination).
 
 Outputs (in --out-dir):
   calib/<transect_cam>.npz    anchor_disp_raw, anchor_img, anchor_person_mask, knots_x, knots_y,
@@ -86,10 +122,11 @@ INSTANCE_STATUS_CHOICES = (
 INSTANCE_CSV_FIELDS = [
     "transect_cam", "event_id", "video_path", "frame_idx", "distance_m", "status",
     "mask_score", "mask_area_px", "x_aligned", "x_raw", "align_inlier_frac", "pred_depth_insample",
-    "size_logk", "size_resid", "align_resid",
+    "size_logk", "size_resid", "align_resid", "video_scale",
 ]
 SUMMARY_CSV_FIELDS = [
     "transect_cam", "n_instances", "n_valid", "distances", "loo_mae_m", "insample_mae_m",
+    "loo_mae_all_m", "n_isotonic_pooled", "n_videos_scaled", "video_scale_range",
     "method", "anchor_distance_m", "notes",
     "fallback_reason", "n_size_rejected", "n_align_rejected", "n_disp_rejected",
 ]
@@ -327,10 +364,109 @@ def _align_consistency_filter(
     return rejected, align_resid
 
 
+def _fit_x(row: dict[str, Any]) -> float:
+    """The disparity value used for downstream disparity-consistency filtering, curve fitting and
+    prediction: 'x_fit' (the per-video-scale-normalized aligned disparity, see
+    `_fit_video_scale`) when video-scale normalization ran for this row, else the plain aligned
+    disparity 'x_aligned'."""
+    return row.get("x_fit", row["x_aligned"])
+
+
+def _fit_video_scale(
+    rows: list[dict[str, Any]], idxs: list[int], size_ok_idxs: list[int]
+) -> tuple[Any, dict[Any, float]]:
+    """Pick the reference video and fit robust per-video disparity-scale factors a_v.
+
+    x_aligned can still carry a per-video multiplicative residual after alignment to a single
+    anchor frame (DA3 disparity scale isn't perfectly recovered by the single-anchor alignment
+    when a camera's reference videos differ e.g. in ambient light or subject framing). This fits
+    log x_i = c_v(i) + b1*log(distance_m_i), a common slope with a per-video intercept, robustified
+    by 2-3 rounds of dropping residuals > 2.5x the current MAD and refitting. a_v = exp(c_v -
+    c_ref); the reference video is pinned to a_v = 1 by construction, since the eventual curve
+    knots (and the real pipeline's alignment anchor) live in the reference video's scale.
+
+    Reference-video selection uses `size_ok_idxs` (the camera's size-consistent instances, i.e.
+    available before alignment even runs): the video with the most distinct distance_m values
+    among them, ties -> most instances. Only videos (other than the reference) with >=3 of `idxs`
+    spanning >=2 distinct distances get their own fitted a_v; every other video (including the
+    reference) gets a_v = 1.0.
+
+    Returns (ref_video, scale_by_video): scale_by_video maps every video present in `idxs` to its
+    a_v (float), defaulting to 1.0.
+    """
+    by_video_size_ok: dict[Any, list[int]] = defaultdict(list)
+    for i in size_ok_idxs:
+        by_video_size_ok[rows[i]["video"]].append(i)
+
+    def _video_key(v):
+        idx_list = by_video_size_ok[v]
+        return (len({rows[i]["distance_m"] for i in idx_list}), len(idx_list))
+
+    ref_video = max(by_video_size_ok, key=_video_key)
+
+    by_video_idxs: dict[Any, list[int]] = defaultdict(list)
+    for i in idxs:
+        by_video_idxs[rows[i]["video"]].append(i)
+    scale_by_video: dict[Any, float] = {v: 1.0 for v in by_video_idxs}
+
+    eligible = sorted(
+        v for v, idx_list in by_video_idxs.items()
+        if v != ref_video
+        and len(idx_list) >= 3
+        and len({rows[i]["distance_m"] for i in idx_list}) >= 2
+    )
+    if not eligible or ref_video not in by_video_idxs:
+        return ref_video, scale_by_video
+
+    fit_videos = [ref_video] + eligible
+    fit_idxs = [i for i in idxs if rows[i]["video"] in fit_videos]
+    n_v = len(fit_videos)
+    if len(fit_idxs) < n_v + 1:
+        return ref_video, scale_by_video
+
+    video_index = {v: k for k, v in enumerate(fit_videos)}
+    log_x = np.array([np.log(rows[i]["x_aligned"]) for i in fit_idxs], dtype=np.float64)
+    log_d = np.array([np.log(rows[i]["distance_m"]) for i in fit_idxs], dtype=np.float64)
+    v_idx = np.array([video_index[rows[i]["video"]] for i in fit_idxs], dtype=np.int64)
+    if not np.all(np.isfinite(log_x)):
+        return ref_video, scale_by_video
+
+    A_full = np.zeros((len(fit_idxs), n_v + 1), dtype=np.float64)
+    A_full[np.arange(len(fit_idxs)), v_idx] = 1.0
+    A_full[:, n_v] = log_d
+
+    mask = np.ones(len(fit_idxs), dtype=bool)
+    coef = None
+    for _ in range(3):
+        if mask.sum() < n_v + 1:
+            break
+        try:
+            coef, *_ = np.linalg.lstsq(A_full[mask], log_x[mask], rcond=None)
+        except np.linalg.LinAlgError:
+            coef = None
+            break
+        resid = log_x - A_full @ coef
+        med = float(np.median(resid[mask]))
+        mad = float(np.median(np.abs(resid[mask] - med)))
+        if mad <= 1e-12 or not np.isfinite(mad):
+            break
+        mask = np.abs(resid - med) <= 2.5 * mad
+
+    if coef is None or mask.sum() < n_v + 1:
+        return ref_video, scale_by_video
+
+    c_ref = coef[video_index[ref_video]]
+    for v in eligible:
+        a_v = float(np.exp(coef[video_index[v]] - c_ref))
+        if np.isfinite(a_v) and a_v > 0:
+            scale_by_video[v] = a_v
+    return ref_video, scale_by_video
+
+
 def _disp_consistency_filter(
     rows: list[dict[str, Any]], ok_idxs: list[int], disp_tolerance: float
 ) -> set[int]:
-    """Fit x_aligned ~ m*(1/distance) + c via RANSAC (need 'distance_m', 'x_aligned') on the
+    """Fit x_fit ~ m*(1/distance) + c via RANSAC (need 'distance_m', 'x_aligned'/'x_fit') on the
     survivors and flag instances whose implied distance is off by more than `disp_tolerance`x.
     Requires >=4 survivors and >=3 distinct distances; if RANSAC fails, no rows are flagged."""
     rejected: set[int] = set()
@@ -340,9 +476,9 @@ def _disp_consistency_filter(
         return rejected
 
     inv_d = np.array([1.0 / rows[i]["distance_m"] for i in ok_idxs])
-    x_aligned = np.array([rows[i]["x_aligned"] for i in ok_idxs])
+    x_fit = np.array([_fit_x(rows[i]) for i in ok_idxs])
     try:
-        fn = timmh.calibrate(inv_d, x_aligned, method="ransac")
+        fn = timmh.calibrate(inv_d, x_fit, method="ransac")
     except Exception:
         return rejected
 
@@ -351,7 +487,7 @@ def _disp_consistency_filter(
         return rejected
 
     for i in ok_idxs:
-        implied_inv_d = (rows[i]["x_aligned"] - c) / m
+        implied_inv_d = (_fit_x(rows[i]) - c) / m
         if not np.isfinite(implied_inv_d) or implied_inv_d <= 0:
             rejected.add(i)
             continue
@@ -362,6 +498,64 @@ def _disp_consistency_filter(
     return rejected
 
 
+def _pava_weighted_nonincreasing(values: np.ndarray, weights: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Weighted pool-adjacent-violators (PAVA), enforcing `values` non-increasing along the input
+    order (index 0 = smallest distance). Ties are pooled too (a later block is merged whenever its
+    weighted average is >= the previous block's, not just >), so the returned per-point fitted
+    values are STRICTLY decreasing across blocks -- exactly what the piecewise-linear knot fit
+    needs (distinct x per knot), with no separate epsilon-nudging step required.
+
+    Implemented by negating `values` (turns "non-increasing" into the textbook "non-decreasing"
+    PAVA), running the standard stack-based pooling algorithm, then negating back.
+
+    Returns (fitted_values, block_id): both length len(values); block_id (0-indexed, increasing)
+    groups points pooled into the same knot.
+    """
+    v = -np.asarray(values, dtype=np.float64)
+    w = np.asarray(weights, dtype=np.float64)
+    stack: list[list[float]] = []  # each entry: [weighted_sum, weight_sum, count]
+    for vi, wi in zip(v, w):
+        stack.append([vi * wi, wi, 1])
+        while len(stack) > 1 and stack[-2][0] / stack[-2][1] >= stack[-1][0] / stack[-1][1]:
+            sw2, ww2, c2 = stack.pop()
+            sw1, ww1, c1 = stack.pop()
+            stack.append([sw1 + sw2, ww1 + ww2, c1 + c2])
+
+    fitted = np.empty(len(values), dtype=np.float64)
+    block_id = np.empty(len(values), dtype=np.int64)
+    pos = 0
+    for bid, (sw, ww, c) in enumerate(stack):
+        avg = -(sw / ww)
+        fitted[pos:pos + c] = avg
+        block_id[pos:pos + c] = bid
+        pos += c
+    return fitted, block_id
+
+
+def _isotonic_pool_by_distance(
+    dists: np.ndarray, x_vals: np.ndarray, weights: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Pool per-distance-level (dists, x_vals) points (dists sorted ascending) via weighted PAVA
+    so x_vals is non-increasing (strictly decreasing between knots) in dists. `weights` is each
+    level's instance count. Each resulting PAVA block becomes one knot: x = the block's constant
+    fitted value, distance = the block's count-weighted mean distance (so a knot merging e.g.
+    10 m and 11 m sits at their weighted-average distance rather than picking one arbitrarily).
+
+    Returns (knots_x, knots_dist, n_isotonic_pooled) where n_isotonic_pooled = the number of
+    original distance levels absorbed into a merge (len(dists) - n_blocks; 0 if already
+    monotone)."""
+    fitted, block_id = _pava_weighted_nonincreasing(x_vals, weights)
+    n_blocks = int(block_id[-1]) + 1 if len(block_id) else 0
+    knots_x = np.empty(n_blocks, dtype=np.float64)
+    knots_dist = np.empty(n_blocks, dtype=np.float64)
+    for b in range(n_blocks):
+        sel = block_id == b
+        knots_x[b] = fitted[sel][0]
+        knots_dist[b] = float(np.average(dists[sel], weights=weights[sel]))
+    n_isotonic_pooled = len(dists) - n_blocks
+    return knots_x, knots_dist, n_isotonic_pooled
+
+
 def _fit_and_fallback(
     rows: list[dict[str, Any]],
     valid_idx: list[int],
@@ -369,17 +563,21 @@ def _fit_and_fallback(
     min_depth: float,
     max_depth: float,
     max_loo_mae: float,
+    loo_max_distance: float = 12.0,
 ) -> dict[str, Any]:
     """Fit the piecewise-linear disparity<->1/distance curve on rows[valid_idx] (need
-    'distance_m', 'x_aligned'), compute LOO/in-sample MAE, and decide per_camera vs. pooled
+    'distance_m', 'x_aligned'/'x_fit'), compute LOO/in-sample MAE, and decide per_camera vs. pooled
     fallback. Returns a dict with 'method' ("per_camera"/"pooled"), 'knots_x', 'knots_y' (None
-    unless method=="per_camera"), 'loo_mae_m', 'insample_mae_m', 'fallback_reasons' (list of
-    strings, empty when method=="per_camera"), 'pred_depth_insample' (dict idx -> predicted
-    depth, only for the fitted valid_idx when method=="per_camera")."""
+    unless method=="per_camera"), 'loo_mae_m', 'insample_mae_m' (both computed only over instances
+    with distance_m <= loo_max_distance), 'loo_mae_all_m' (over all distances, diagnostic only),
+    'n_isotonic_pooled', 'fallback_reasons' (list of strings, empty when method=="per_camera"),
+    'pred_depth_insample' (dict idx -> predicted depth, only for the fitted valid_idx when
+    method=="per_camera")."""
     distinct_distances = sorted({rows[i]["distance_m"] for i in valid_idx})
     result: dict[str, Any] = {
         "method": "pooled", "knots_x": None, "knots_y": None,
-        "loo_mae_m": None, "insample_mae_m": None, "fallback_reasons": [],
+        "loo_mae_m": None, "insample_mae_m": None, "loo_mae_all_m": None,
+        "n_isotonic_pooled": None, "fallback_reasons": [],
         "pred_depth_insample": {},
     }
     if len(distinct_distances) < 3:
@@ -389,52 +587,60 @@ def _fit_and_fallback(
     def fit_curve(idxs):
         by_dist: dict[float, list[float]] = defaultdict(list)
         for i in idxs:
-            by_dist[rows[i]["distance_m"]].append(rows[i]["x_aligned"])
-        dists = sorted(by_dist)
+            by_dist[rows[i]["distance_m"]].append(_fit_x(rows[i]))
+        dists = np.array(sorted(by_dist), dtype=np.float64)
         x_d = np.array([np.median(by_dist[d]) for d in dists], dtype=np.float64)
-        y_d = np.array([1.0 / d for d in dists], dtype=np.float64)
-        return timmh.piecewise_linear_calibration(x_d, y_d)
+        counts = np.array([len(by_dist[d]) for d in dists], dtype=np.float64)
+        knots_x, knots_dist, n_pooled = _isotonic_pool_by_distance(dists, x_d, counts)
+        knots_y = 1.0 / knots_dist
+        return timmh.piecewise_linear_calibration(knots_x, knots_y), n_pooled
 
-    curve = fit_curve(valid_idx)
+    curve, n_isotonic_pooled = fit_curve(valid_idx)
     knots_x, knots_y = curve.knots_x, curve.knots_y
 
-    insample_errs = []
+    insample_errs_near = []
     pred_depth_insample: dict[int, float] = {}
     for i in valid_idx:
-        pred_depth = float(1.0 / curve(np.array([rows[i]["x_aligned"]]))[0])
+        pred_depth = float(1.0 / curve(np.array([_fit_x(rows[i])]))[0])
         pred_depth_insample[i] = pred_depth
-        insample_errs.append(abs(pred_depth - rows[i]["distance_m"]))
-    insample_mae_m = float(np.mean(insample_errs)) if insample_errs else None
+        if rows[i]["distance_m"] <= loo_max_distance:
+            insample_errs_near.append(abs(pred_depth - rows[i]["distance_m"]))
+    insample_mae_m = float(np.mean(insample_errs_near)) if insample_errs_near else None
 
-    loo_errs = []
+    loo_errs_near = []
+    loo_errs_all = []
+    n_near = sum(1 for i in valid_idx if rows[i]["distance_m"] <= loo_max_distance)
     for i in valid_idx:
         remaining = [j for j in valid_idx if j != i]
         remaining_dists = {rows[j]["distance_m"] for j in remaining}
         if len(remaining_dists) < 2:
             continue
-        loo_curve = fit_curve(remaining)
-        pred_depth = float(1.0 / loo_curve(np.array([rows[i]["x_aligned"]]))[0])
-        loo_errs.append(abs(pred_depth - rows[i]["distance_m"]))
-    loo_mae_m = float(np.mean(loo_errs)) if loo_errs else None
+        loo_curve, _ = fit_curve(remaining)
+        pred_depth = float(1.0 / loo_curve(np.array([_fit_x(rows[i])]))[0])
+        err = abs(pred_depth - rows[i]["distance_m"])
+        loo_errs_all.append(err)
+        if rows[i]["distance_m"] <= loo_max_distance:
+            loo_errs_near.append(err)
+    loo_mae_all_m = float(np.mean(loo_errs_all)) if loo_errs_all else None
+    loo_mae_m = float(np.mean(loo_errs_near)) if loo_errs_near else None
 
     fallback_reasons = []
-    # per_camera requires an actually-validated curve: a missing/non-finite LOO MAE (unvalidated)
-    # is rejected just as much as one that exceeds the threshold. With >=3 distinct distances
-    # (guaranteed above), every LOO fold keeps >=2 remaining distances, so loo_mae_m is None here
-    # only in truly degenerate cases (e.g. all x_aligned identical) -- still not trustworthy.
-    if loo_mae_m is None or not np.isfinite(loo_mae_m):
+    # per_camera requires an actually-validated curve, restricted to distance_m <= loo_max_distance
+    # (far-distance disparity is nearly flat, so small disparity noise there blows up the implied
+    # distance error without reflecting calibration quality where CTDS actually uses it). A missing/
+    # non-finite/underpowered (<2 near instances) LOO MAE is rejected just as much as one that
+    # exceeds the threshold.
+    if n_near < 2 or loo_mae_m is None or not np.isfinite(loo_mae_m):
         fallback_reasons.append("loo_unavailable")
     elif loo_mae_m > max_loo_mae:
         fallback_reasons.append(f"loo_mae>{max_loo_mae}")
     if insample_mae_m is None or not np.isfinite(insample_mae_m):
         fallback_reasons.append("insample_mae_unavailable")
-    if len(knots_y) >= 2:
-        # Allow small (<5% of the knots' own y-scale) non-monotone dips: sparse, single-sample
-        # far-distance knots (e.g. 10 m vs. 11 m, both near-identical disparity) can reverse by
-        # measurement noise alone without indicating a broken curve; only flag real reversals.
-        y_scale = max(float(np.max(np.abs(knots_y))), 1e-9)
-        if np.any(np.diff(knots_y) < -0.05 * y_scale):
-            fallback_reasons.append("non_monotone")
+    if len(knots_x) < 3:
+        # The isotonic pooling above guarantees x_vals is non-increasing, so the curve is always
+        # monotone; this only fires if pooling collapsed too many distance levels together to
+        # leave a validated 3-knot curve.
+        fallback_reasons.append("too_few_distances_after_isotonic")
     test_x = np.linspace(1.0 / max_depth, 1.0 / min_depth, 25)
     if not np.all(np.isfinite(curve(test_x))):
         fallback_reasons.append("non_finite_over_range")
@@ -446,6 +652,8 @@ def _fit_and_fallback(
         "knots_y": knots_y if method == "per_camera" else None,
         "loo_mae_m": loo_mae_m,
         "insample_mae_m": insample_mae_m,
+        "loo_mae_all_m": loo_mae_all_m,
+        "n_isotonic_pooled": n_isotonic_pooled,
         "fallback_reasons": fallback_reasons,
         "pred_depth_insample": pred_depth_insample if method == "per_camera" else {},
     })
@@ -456,24 +664,30 @@ def calibrate_camera_from_rows(
     rows: list[dict[str, Any]],
     *,
     size_tolerance: float = 2.0,
-    align_tolerance: float = 1.5,
+    align_tolerance: float = 3.0,
     disp_tolerance: float = 1.5,
     max_loo_mae: float = 3.0,
+    loo_max_distance: float = 12.0,
     min_depth: float = 1.0,
     max_depth: float = 25.0,
+    video_scale: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Pure (no disparity maps, no anchor/alignment, no I/O) calibration layer: given
     already-aligned per-instance rows (each needs 'distance_m', 'mask_area_px', 'x_aligned',
-    'x_raw', 'video'), run the size-, alignment-, and disparity-consistency filters and fit the
-    per-camera curve. `build_camera_calibration` runs the same filter functions (see
-    `_size_consistency_filter`, `_align_consistency_filter`, `_disp_consistency_filter`,
-    `_fit_and_fallback` above) interleaved with real anchor selection/alignment retries; this is
-    the reusable filter+fit core for callers (tests, offline re-analysis of an existing
-    calibration_instances.csv) that already have x_aligned/x_raw for every instance.
+    'x_raw', 'video'), run the size-, alignment-, video-scale- and disparity-consistency steps and
+    fit the per-camera curve. `build_camera_calibration` runs the same filter functions (see
+    `_size_consistency_filter`, `_align_consistency_filter`, `_fit_video_scale`,
+    `_disp_consistency_filter`, `_fit_and_fallback` above) interleaved with real anchor
+    selection/alignment retries; this is the reusable filter+fit core for callers (tests, offline
+    re-analysis of an existing calibration_instances.csv) that already have x_aligned/x_raw for
+    every instance. Since there's no real alignment anchor here, video-scale normalization still
+    picks a reference video (see `_fit_video_scale`) and treats the given x_aligned as if it were
+    already in that video's scale.
 
     Returns (rows_out, summary): rows_out is `rows` with 'status', 'size_logk', 'size_resid',
-    'align_resid', 'pred_depth_insample' added; summary has 'method', 'knots_x', 'knots_y',
-    'loo_mae_m', 'insample_mae_m', 'fallback_reason', 'n_instances', 'n_valid',
+    'align_resid', 'video_scale', 'pred_depth_insample' added; summary has 'method', 'knots_x',
+    'knots_y', 'loo_mae_m', 'insample_mae_m', 'loo_mae_all_m', 'n_isotonic_pooled',
+    'n_videos_scaled', 'video_scale_range', 'fallback_reason', 'n_instances', 'n_valid',
     'n_size_rejected', 'n_align_rejected', 'n_disp_rejected', 'distances'.
     """
     n = len(rows)
@@ -483,10 +697,28 @@ def calibrate_camera_from_rows(
     align_rejected, align_resid = _align_consistency_filter(rows, ok_idxs, align_tolerance)
     ok_idxs2 = [i for i in ok_idxs if i not in align_rejected]
 
+    scale_by_video: dict[Any, float] = {}
+    if video_scale and ok_idxs2:
+        _, scale_by_video = _fit_video_scale(rows, ok_idxs2, ok_idxs)
+    for i in ok_idxs2:
+        a_v = scale_by_video.get(rows[i]["video"], 1.0)
+        rows[i]["video_scale"] = a_v
+        rows[i]["x_fit"] = rows[i]["x_aligned"] / a_v
+
     disp_rejected = _disp_consistency_filter(rows, ok_idxs2, disp_tolerance)
     valid_idx = [i for i in ok_idxs2 if i not in disp_rejected]
 
-    fit = _fit_and_fallback(rows, valid_idx, min_depth=min_depth, max_depth=max_depth, max_loo_mae=max_loo_mae)
+    fit = _fit_and_fallback(
+        rows, valid_idx, min_depth=min_depth, max_depth=max_depth, max_loo_mae=max_loo_mae,
+        loo_max_distance=loo_max_distance,
+    )
+
+    n_videos_scaled = len({v for v, a in scale_by_video.items() if a != 1.0})
+    video_scale_range = ""
+    if scale_by_video:
+        used_scales = [scale_by_video.get(rows[i]["video"], 1.0) for i in ok_idxs2]
+        if used_scales:
+            video_scale_range = f"{min(used_scales)};{max(used_scales)}"
 
     rows_out = []
     for i, r in enumerate(rows):
@@ -503,6 +735,7 @@ def calibrate_camera_from_rows(
         out["size_logk"] = size_logk[i]
         out["size_resid"] = size_resid[i]
         out["align_resid"] = align_resid.get(i)
+        out["video_scale"] = r.get("video_scale")
         out["pred_depth_insample"] = fit["pred_depth_insample"].get(i)
         rows_out.append(out)
 
@@ -516,6 +749,10 @@ def calibrate_camera_from_rows(
         "knots_y": fit["knots_y"],
         "loo_mae_m": fit["loo_mae_m"],
         "insample_mae_m": fit["insample_mae_m"],
+        "loo_mae_all_m": fit["loo_mae_all_m"],
+        "n_isotonic_pooled": fit["n_isotonic_pooled"],
+        "n_videos_scaled": n_videos_scaled,
+        "video_scale_range": video_scale_range,
         "fallback_reason": ";".join(fit["fallback_reasons"]) if fit["method"] == "pooled" else "",
         "n_size_rejected": sum(1 for ok in size_ok if not ok),
         "n_align_rejected": len(align_rejected),
@@ -550,9 +787,11 @@ def build_camera_calibration(
     max_depth: float = 25.0,
     da3_model_id: Optional[str] = None,
     size_tolerance: float = 2.0,
-    align_tolerance: float = 1.5,
+    align_tolerance: float = 3.0,
     disp_tolerance: float = 1.5,
     max_loo_mae: float = 3.0,
+    loo_max_distance: float = 12.0,
+    video_scale: bool = True,
 ) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Build one camera's calibration from its (already SAM3+DA3-processed) instances.
 
@@ -564,13 +803,17 @@ def build_camera_calibration(
       frame_bgr (optional; only used if this instance becomes the anchor).
 
     Pipeline: 1) size-consistency filter (`_size_consistency_filter`) on all instances; 2) pick
-    the alignment anchor among the size-consistent survivors (smallest mask_area_px, ties ->
-    highest vlm_conf); 3) align every size-consistent instance onto that anchor; 4) alignment-
-    consistency filter (`_align_consistency_filter`) on the successfully-aligned survivors; 5)
-    disparity-consistency filter (`_disp_consistency_filter`) on those survivors; if the anchor
-    itself is rejected in step 4 or 5, re-pick the next-smallest-area survivor as anchor and redo
-    steps 3-5 once; 6) fit the per-camera curve and decide per_camera/pooled fallback
-    (`_fit_and_fallback`).
+    the reference video (`_fit_video_scale`'s rule: most distinct distances among the
+    size-consistent instances, ties -> most instances) and the alignment anchor among the
+    size-consistent survivors WITHIN that video (smallest mask_area_px, ties -> highest vlm_conf)
+    -- so the final curve (and the saved anchor) live in the reference video's scale; 3) align
+    every size-consistent instance onto that anchor; 4) alignment-consistency filter
+    (`_align_consistency_filter`) on the successfully-aligned survivors; 5) video-scale
+    normalization (`_fit_video_scale`) of the survivors against the reference video; 6)
+    disparity-consistency filter (`_disp_consistency_filter`, on the normalized x_fit) on those
+    survivors; if the anchor itself is rejected in step 4 or 6, re-pick the next-smallest-area
+    survivor (still within the reference video) as anchor and redo steps 3-6 once; 7) fit the
+    per-camera curve and decide per_camera/pooled fallback (`_fit_and_fallback`).
 
     Returns (npz_dict, instance_rows, summary_row). `npz_dict` is None if there are no
     instances at all; otherwise it always carries anchor_* fields, and knots_x/knots_y are
@@ -600,8 +843,16 @@ def build_camera_calibration(
 
     size_ok, size_logk, size_resid = _size_consistency_filter(base_rows, size_tolerance)
     valid_idxs = [i for i in range(n) if size_ok[i]]
-    anchor_candidates = sorted(valid_idxs, key=lambda i: _anchor_sort_key(instances[i]))
-    attempts = anchor_candidates[:2] if len(anchor_candidates) >= 2 else anchor_candidates[:1]
+
+    by_video_valid: dict[Any, list[int]] = defaultdict(list)
+    for i in valid_idxs:
+        by_video_valid[base_rows[i]["video"]].append(i)
+    ref_video = max(
+        by_video_valid,
+        key=lambda v: (len({base_rows[i]["distance_m"] for i in by_video_valid[v]}), len(by_video_valid[v])),
+    )
+    ref_candidates = sorted(by_video_valid[ref_video], key=lambda i: _anchor_sort_key(instances[i]))
+    attempts = ref_candidates[:2] if len(ref_candidates) >= 2 else ref_candidates[:1]
 
     anchor_idx = attempts[0]
     anchor_disp_raw = anchor_mask = None
@@ -610,6 +861,7 @@ def build_camera_calibration(
     align_rejected: set[int] = set()
     align_resid: dict[int, Optional[float]] = {}
     disp_rejected: set[int] = set()
+    scale_by_video: dict[Any, float] = {}
 
     for attempt_i, cand_idx in enumerate(attempts):
         cand_anchor = instances[cand_idx]
@@ -627,6 +879,15 @@ def build_camera_calibration(
         ok_idxs = [i for i in valid_idxs if cand_statuses[i] == "ok"]
         cand_align_rejected, cand_align_resid = _align_consistency_filter(base_rows, ok_idxs, align_tolerance)
         ok_idxs2 = [i for i in ok_idxs if i not in cand_align_rejected]
+
+        cand_scale_by_video: dict[Any, float] = {}
+        if video_scale and ok_idxs2:
+            _, cand_scale_by_video = _fit_video_scale(base_rows, ok_idxs2, valid_idxs)
+        for i in ok_idxs2:
+            a_v = cand_scale_by_video.get(base_rows[i]["video"], 1.0)
+            base_rows[i]["video_scale"] = a_v
+            base_rows[i]["x_fit"] = base_rows[i]["x_aligned"] / a_v
+
         cand_disp_rejected = _disp_consistency_filter(base_rows, ok_idxs2, disp_tolerance)
 
         is_last = attempt_i == len(attempts) - 1
@@ -637,6 +898,7 @@ def build_camera_calibration(
             align_statuses, align_inlier_fracs = cand_statuses, cand_inlier
             align_rejected, align_resid = cand_align_rejected, cand_align_resid
             disp_rejected = cand_disp_rejected
+            scale_by_video = cand_scale_by_video
             break
 
     anchor = instances[anchor_idx]
@@ -670,16 +932,29 @@ def build_camera_calibration(
             "size_logk": size_logk[i],
             "size_resid": size_resid[i],
             "align_resid": align_resid.get(i),
+            "video_scale": base_rows[i].get("video_scale"),
         })
+        if "x_fit" in base_rows[i]:
+            rows[i]["x_fit"] = base_rows[i]["x_fit"]
 
     valid_idx = [i for i, r in enumerate(rows) if r["status"] == "ok"]
-    fit = _fit_and_fallback(rows, valid_idx, min_depth=min_depth, max_depth=max_depth, max_loo_mae=max_loo_mae)
+    fit = _fit_and_fallback(
+        rows, valid_idx, min_depth=min_depth, max_depth=max_depth, max_loo_mae=max_loo_mae,
+        loo_max_distance=loo_max_distance,
+    )
     for i, pd in fit["pred_depth_insample"].items():
         rows[i]["pred_depth_insample"] = pd
 
     method = fit["method"]
     knots_x, knots_y = fit["knots_x"], fit["knots_y"]
     loo_mae_m, insample_mae_m = fit["loo_mae_m"], fit["insample_mae_m"]
+
+    n_videos_scaled = len({v for v, a in scale_by_video.items() if a != 1.0})
+    video_scale_range = ""
+    if scale_by_video:
+        used_scales = [base_rows[i].get("video_scale", 1.0) for i in valid_idx]
+        if used_scales:
+            video_scale_range = f"{min(used_scales)};{max(used_scales)}"
 
     anchor_img = anchor.get("frame_bgr")
     if anchor_img is not None:
@@ -712,6 +987,10 @@ def build_camera_calibration(
         "distances": ";".join(str(d) for d in all_distances),
         "loo_mae_m": loo_mae_m,
         "insample_mae_m": insample_mae_m,
+        "loo_mae_all_m": fit["loo_mae_all_m"],
+        "n_isotonic_pooled": fit["n_isotonic_pooled"],
+        "n_videos_scaled": n_videos_scaled,
+        "video_scale_range": video_scale_range,
         "method": method,
         "anchor_distance_m": float(anchor["distance_m"]),
         "notes": "",
@@ -818,7 +1097,7 @@ def plot_camera_curve(rows: list[dict[str, Any]], npz_dict: dict[str, Any], out_
     fig, ax = plt.subplots(figsize=(5, 4))
     valid = [r for r in rows if r["status"] == "ok"]
     if valid:
-        xs = [r["x_aligned"] for r in valid]
+        xs = [_fit_x(r) for r in valid]
         ys = [1.0 / r["distance_m"] for r in valid]
         ax.scatter(xs, ys, s=16, color="black", label="instances")
     if knots_x is not None and knots_y is not None:
@@ -858,7 +1137,7 @@ def read_instance_rows(csv_path: Path) -> list[dict[str, Any]]:
     with csv_path.open(newline="") as f:
         for r in csv.DictReader(f):
             r["distance_m"] = float(r["distance_m"]) if r["distance_m"] not in (None, "") else None
-            for k in ("x_aligned", "x_raw", "align_inlier_frac", "pred_depth_insample", "size_logk", "size_resid", "align_resid"):
+            for k in ("x_aligned", "x_raw", "align_inlier_frac", "pred_depth_insample", "size_logk", "size_resid", "align_resid", "video_scale"):
                 v = r.get(k)
                 r[k] = float(v) if v not in (None, "") else float("nan")
             rows.append(r)
@@ -1003,18 +1282,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "median log(k) by more than log(this), i.e. this is a multiplicative factor.",
     )
     p.add_argument(
-        "--align-tolerance", type=float, default=1.5,
+        "--align-tolerance", type=float, default=3.0,
         help="Reject instances whose x_aligned/x_raw ratio deviates from the same camera+video "
-             "group's median by more than this multiplicative factor.",
+             "group's median by more than this multiplicative factor. Only meant to catch gross "
+             "alignment failures: DA3's per-frame scale genuinely shifts for near (frame-filling) "
+             "people, and removing that shift is exactly what alignment is for, so a tight "
+             "tolerance here would reject the near, most-informative frames.",
     )
     p.add_argument(
         "--disp-tolerance", type=float, default=1.5,
-        help="Reject instances whose implied distance (from a RANSAC fit of aligned disparity "
-             "vs. 1/distance) is off by more than this multiplicative factor.",
+        help="Reject instances whose implied distance (from a RANSAC fit of aligned, video-scale-"
+             "normalized disparity vs. 1/distance) is off by more than this multiplicative factor.",
     )
     p.add_argument(
         "--max-loo-mae", type=float, default=3.0,
-        help="Fall back from per_camera to pooled_anchor if leave-one-out MAE exceeds this (m).",
+        help="Fall back from per_camera to pooled_anchor if leave-one-out MAE (over instances "
+             "<= --loo-max-distance) exceeds this (m).",
+    )
+    p.add_argument(
+        "--loo-max-distance", type=float, default=12.0,
+        help="Compute leave-one-out MAE (and the in-sample MAE used for the per_camera gate) only "
+             "over instances at this distance or closer (m); all instances are still used to fit "
+             "the curve. Far-distance disparity is nearly flat, so small disparity noise there "
+             "blows up the implied distance error without reflecting calibration quality where it "
+             "matters (CTDS right-truncates at 12 m).",
+    )
+    p.add_argument(
+        "--no-video-scale", dest="video_scale", action="store_false",
+        help="Disable per-video disparity-scale normalization (see module docstring); by default "
+             "it's enabled.",
     )
     return p.parse_args(argv)
 
@@ -1071,6 +1367,7 @@ def main(argv: list[str] | None = None) -> None:
             min_depth=args.min_depth, max_depth=args.max_depth, da3_model_id=args.da3_model_id,
             size_tolerance=args.size_tolerance, align_tolerance=args.align_tolerance,
             disp_tolerance=args.disp_tolerance, max_loo_mae=args.max_loo_mae,
+            loo_max_distance=args.loo_max_distance, video_scale=args.video_scale,
         )
         camera_rows = unmasked_rows + rows
         append_instance_rows(instances_csv, camera_rows)
