@@ -183,26 +183,47 @@ Depth-analysis helpers are documented separately in [`apps/camera_trap/scripts/R
 
 ## PSS P3 end-to-end pipeline
 
-The PSS P3 chimpanzee camera-trap distance-sampling analysis chains six stages, all runnable on
-Isambard AI as SLURM jobs:
+The PSS P3 chimpanzee camera-trap distance-sampling analysis estimates each detection's distance
+from the camera using the method of Haucke, Kühl, Hoyer & Steinhage (2022), "Overcoming the
+distance estimation bottleneck in estimating animal abundance with camera traps," *Ecological
+Informatics*, 68, 101536 — a monocular-depth-based disparity calibration, ported into this repo
+from the [`timmh/distance-estimation`](https://github.com/timmh/distance-estimation) reference
+implementation. (This replaces an earlier linear per-camera fit driven by VLM-read distance-board
+numbers; that approach — `read_boards.py` → `calibration/fit.py` → `calibration.json` — has been
+removed.)
 
-1. **Reference-video dap3 run** — `dap3_cli.py` on the calibration reference videos with prompt
-   `"person holding sign"` and `--npz` (NPZ is needed here for calibration board reading).
-2. **Calibration** — `apps/camera_trap/calibration/read_boards.py` (VLM reads distance-board
-   numbers from the reference run's masks) → `apps/camera_trap/calibration/fit.py` → a per-camera
-   linear depth `calibration.json`.
-3. **Main dap3 run** — `dap3_cli.py` on the actual chimp videos with `--npz` (NPZ is needed for
-   mask QC, not for the exporter). Uses the *same* `--da3-model-id`/`--da3-mode`/`--da3-batch-size`/
-   `--target-fps` as the reference run — required for the calibration to be valid. Runs in
-   parallel with stages 1–2.
-4. **Mask QC** — `apps/camera_trap/qc/mask_verify.py` (VLM), sharded, on the main run's output →
-   `track_qc.csv`.
-5. **Export** — `apps/camera_trap/scripts/export_job_distances_csv.py --calibration
-   calibration.json --track-qc track_qc.csv` → a per-detection distances CSV. This step is
-   **JSON-only**; it does not read the NPZ arrays (older notes in this repo suggesting otherwise
-   are stale — NPZ is only needed by stages 1/3 for downstream calibration/QC, not by the
-   exporter).
-6. **Abundance** — `apps/camera_trap/abundance/build_ctds_inputs.py` (builds `Distance`-package
+The pipeline chains the following stages, all runnable on Isambard AI as SLURM jobs (see
+`hpc/scripts/run_full_pipeline.sh`, the source of truth for stage names/dependencies/env vars):
+
+1. **A/A'. Find sign frames** — `apps/camera_trap/calibration/find_sign_frames.py`
+   (`hpc/jobs/find_sign_frames.sh`, a sharded array job) — a VLM agent scans the raw reference
+   videos to find frames where a person holds a distance sign, producing `calibration_frames.csv`
+   (plus `events_summary.csv` and `contact_sheet.html`, a QC artefact worth eyeballing). Stage A'
+   is a build-only merge of the shards into the final CSV.
+2. **B. Build reference** — `apps/camera_trap/calibration/build_reference.py`
+   (`hpc/jobs/build_reference.sh`, GPU, runs in the `dap3-sam3` apptainer container) — runs a SAM3
+   person-mask segmenter and DA3 depth on the calibration frames, producing per-camera
+   `calib/<transect_cam>.npz`, a pooled `calib/_pooled.npz`, and `calibration_summary.csv` (check
+   its `loo_mae_m` column — leave-one-out mean absolute error in metres — as the key calibration
+   QC number), plus `instances/` overlay images and `calibration_plots/` (more QC artefacts).
+3. **C. Main dap3 run** — `dap3_cli.py` on the actual chimp videos with `--npz` and
+   `--depth-interval-seconds` (default 2s — DA3 depth is now computed on a time grid rather than
+   every frame, for speed; NPZ depth is stored float16 at native resolution). Runs in parallel
+   with stages 1–2.
+4. **D. Mask QC** — `apps/camera_trap/qc/mask_verify.py` (VLM), sharded, on the main run's output
+   → `track_qc.csv`. Depends on C.
+5. **E1/E1'. Apply calibration** — `apps/camera_trap/calibration/apply.py`
+   (`hpc/jobs/apply_calibration.sh`, sharded array job + merge) — depends on B and C. Aligns each
+   frame's disparity onto the camera's reference anchor via RANSAC, then applies the per-camera
+   piecewise-linear calibration curve, producing `calibrated_objects.csv` (per-detection distance,
+   `calib_method`, alignment inlier fraction, etc.) and `apply_summary.json` (a QC artefact —
+   counts per `calib_method`/camera and failures by reason). Optionally
+   `--extrinsic-recalibration --lightglue-weights ... --video-dir ...` for cameras that moved
+   between the reference and main runs.
+6. **E2. Export** — `apps/camera_trap/scripts/export_job_distances_csv.py --calibrated-objects
+   calibrated_objects.csv --track-qc track_qc.csv` → a per-detection `distances.csv`. Depends on D
+   and E1'.
+7. **F. Abundance** — `apps/camera_trap/abundance/build_ctds_inputs.py` (builds `Distance`-package
    flatfile + activity inputs) → `apps/camera_trap/abundance/ctds_abundance.R` (fits the
    detection function + activity model, produces density/abundance estimates).
 
@@ -221,16 +242,19 @@ PIPELINE_ENV=hpc/configs/my_pipeline.env hpc/scripts/run_full_pipeline.sh
 ```
 
 Each stage's underlying CLI resumes/skips existing outputs by default, so re-running the script
-after a partial failure is safe. Individual stages can be skipped with `SKIP_REF=1`, `SKIP_CALIB=1`,
-`SKIP_MAIN=1`, `SKIP_QC=1`, `SKIP_EXPORT=1`, `SKIP_ABUNDANCE=1` — when skipping a stage whose output
-a later stage needs, point the pipeline at the existing output via `REF_JOB_DIR`, `MAIN_JOB_DIR`,
-`CALIBRATION_JSON`, `TRACK_QC_CSV`, or `DISTANCES_CSV`. See `hpc/scripts/run_full_pipeline.sh` and
+after a partial failure is safe. Individual stages can be skipped with `SKIP_SIGNS=1`,
+`SKIP_REFCAL=1`, `SKIP_MAIN=1`, `SKIP_QC=1`, `SKIP_APPLY=1`, `SKIP_EXPORT=1`, `SKIP_ABUNDANCE=1` —
+when skipping a stage whose output a later stage needs, point the pipeline at the existing output
+via `CALIBRATION_FRAMES_CSV`, `CALIB_DIR`, `MAIN_JOB_DIR`, `TRACK_QC_CSV`,
+`CALIBRATED_OBJECTS_CSV`, or `DISTANCES_CSV`. See `hpc/scripts/run_full_pipeline.sh` and
 `hpc/configs/pipeline.env.example` for the full variable list, and `hpc/README.md` for job-script
 and container details (including the new `envs/containers/dap3-sam3.def`, needed for
 `--sam3-backend official`).
 
-Outputs land under `OUT_ROOT`: `reference/`, `main/` (dap3 runs), `calibration/calibration.json`,
-`main/qc/track_qc.csv`, `distances.csv`, and `abundance/` (CTDS flatfile, activity inputs, and
+Outputs land under `OUT_ROOT`: `sign_frames/calibration_frames.csv`, `calibration/calib/`
+(per-camera `.npz` + `calibration_summary.csv`), `main/` (dap3 runs, with
+`main/calib_applied/calibrated_objects.csv` + `apply_summary.json` and `main/qc/track_qc.csv`),
+`distances.csv`, and `abundance/` (CTDS flatfile, activity inputs, and
 `abundance_estimates.csv`).
 
 ## Full Command Template

@@ -13,6 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 NEW_OR_CHANGED_SH = [
     "hpc/jobs/dap3_predict_array.sh",
     "hpc/jobs/find_sign_frames.sh",
+    "hpc/jobs/build_reference.sh",
+    "hpc/jobs/apply_calibration.sh",
     "hpc/jobs/mask_verify_array.sh",
     "hpc/jobs/export_distances.sh",
     "hpc/jobs/ctds_abundance.sh",
@@ -40,7 +42,6 @@ def _write_pipeline_env(path: Path, out_root: Path) -> None:
             [
                 f'REPO_ROOT="{REPO_ROOT}"',
                 'VIDEO_DIR="assets/videos"',
-                'REF_VIDEO_DIR="assets/reference_videos"',
                 'REFERENCE_ROOT="/tmp/wcf-pps-p3"',
                 f'OUT_ROOT="{out_root}"',
                 'SAM3_CKPT="weights/sam3/sam3-safari-neg-parents.pt"',
@@ -73,15 +74,39 @@ def test_run_full_pipeline_dry_run(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     output = result.stdout + result.stderr
 
-    for marker in ["[A]", "[B]", "[C]", "[D]", "[E]", "[F]"]:
+    for marker in ["[A]", "[A']", "[B]", "[C]", "[D]", "[E1]", "[E1']", "[E2]", "[F]"]:
         assert marker in output, f"missing stage marker {marker} in dry-run output"
 
+    assert "find_sign_frames.sh" in output
+    assert "build_reference.sh" in output
+    assert "apply_calibration.sh" in output
     assert "dap3_predict_array.sh" in output
-    assert "read_boards.sh" in output
     assert "mask_verify_array.sh" in output
     assert "export_distances.sh" in output
     assert "ctds_abundance.sh" in output
     assert "--dependency=afterok:" in output
+
+
+def test_run_full_pipeline_dry_run_skip_signs(tmp_path: Path) -> None:
+    env_file = tmp_path / "pipeline.env"
+    out_root = tmp_path / "pss_p3_out"
+    _write_pipeline_env(env_file, out_root)
+
+    env = dict(os.environ)
+    env["DRY_RUN"] = "1"
+    env["PIPELINE_ENV"] = str(env_file)
+    env["SKIP_SIGNS"] = "1"
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "hpc/scripts/run_full_pipeline.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=REPO_ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    output = result.stdout + result.stderr
+    assert "SKIP_SIGNS=1" in output
 
 
 def test_run_full_pipeline_missing_env_errors() -> None:

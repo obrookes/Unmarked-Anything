@@ -1,3 +1,30 @@
+# Project Status — 2026-09-23
+
+Branch `feat/timmh-calibration` reworks PSS P3 distance calibration from the earlier linear
+per-camera fit onto the Haucke et al. (2022, *Ecological Informatics* 68:101536) disparity-based
+method, ported from `timmh/distance-estimation`:
+
+- New calibration modules: `apps/camera_trap/calibration/find_sign_frames.py` (VLM agent scans
+  reference videos for person-holding-a-sign frames, array job `hpc/jobs/find_sign_frames.sh`,
+  producing `calibration_frames.csv`), `apps/camera_trap/calibration/build_reference.py` (SAM3
+  person mask + DA3 depth per-camera fit, job `hpc/jobs/build_reference.sh`, producing
+  `calib/<transect_cam>.npz` + `calibration_summary.csv` with a `loo_mae_m` QC column), and
+  `apps/camera_trap/calibration/apply.py` (RANSAC disparity alignment to each camera's reference
+  anchor + piecewise-linear calibration, array job `hpc/jobs/apply_calibration.sh`, producing
+  `calibrated_objects.csv` + `apply_summary.json`).
+- `dap3_cli.py` gained `--depth-interval-seconds` (default 2s): DA3 depth is now computed on a
+  time grid rather than every frame, for speed; NPZ depth is stored float16 at native resolution.
+- `export_job_distances_csv.py` now takes `--calibrated-objects calibrated_objects.csv
+  --track-qc track_qc.csv`, replacing the old `--calibration calibration.json`.
+- `hpc/scripts/run_full_pipeline.sh` rewritten around the new stage graph (find_sign_frames →
+  build_reference → apply_calibration, in parallel with the main dap3 run and mask QC → export →
+  abundance), with matching `SKIP_*`/resume env vars documented in
+  `hpc/configs/pipeline.env.example`.
+- `apps/camera_trap/calibration/fit.py` and its test have been deleted — superseded by
+  `build_reference.py`/`apply.py`.
+
+---
+
 # Project Status — 2026-09-22
 
 Branch `feat/sam3-calib-ctds` (off `dev`) adds the full PSS P3 calibration/CTDS pipeline:

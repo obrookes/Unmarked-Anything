@@ -7,10 +7,13 @@ fps (`video_fps` from the JSON) since `frame_index` is a native frame index rega
 any `target_fps` subsampling used at inference time.
 
 Optional post-processing:
-- `--calibration PATH`: apply a per-camera linear calibration (see
-  `apps/camera_trap/calibration/fit.py`) to raw depth before window-averaging. The camera
-  is identified as `transect_cam`, extracted from the video name. Adds `transect_cam`,
-  `raw_distance`, and `calib_method` columns; `distance` becomes the calibrated value.
+- `--calibrated-objects CSV`: look up per-(video, frame, track) calibrated distances from an
+  `apply.py`-produced `calibrated_objects.csv` (Haucke et al. 2022 method). For each sampled
+  frame, the row is matched at the exact grid frame (`sampled_idx`), since calibrated-objects
+  rows only exist on the DA3 2s-grid. `distance` becomes the row's `distance_m`, `calib_method`
+  and `raw_depth_at_point` are taken from the row, and `raw_distance` remains the raw
+  `depth_mask_mean` window-averaged value. Sampled rows with no matching calibrated-objects row,
+  or with `calib_method == "failed"`, are dropped (see `--dropped-log`).
 - `--track-qc PATH`: drop tracks flagged `keep=False` in a track_qc.csv (columns
   `video_name, track_id, n_checked, n_reject, reject_frac, issues, keep`), matched by
   video name (extension-insensitive) and track id.
@@ -46,6 +49,7 @@ CSV_COLUMNS = [
     "confidence",
     "transect_cam",
     "raw_distance",
+    "raw_depth_at_point",
     "calib_method",
     "detection_datetime",
 ]
@@ -95,8 +99,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--interval-seconds",
         type=float,
-        required=True,
-        help="Sampling interval in seconds; sample points are aligned to the global grid 0, interval, 2*interval, ...",
+        default=2.0,
+        help="Sampling interval in seconds; sample points are aligned to the global grid 0, interval, 2*interval, ... (default: 2.0, matching the DA3 depth grid).",
     )
     parser.add_argument(
         "--window-seconds",
@@ -151,13 +155,17 @@ def parse_args() -> argparse.Namespace:
         help="Exclude tracks whose confidence score is below this threshold (default: 0.5). Set 0.0 to disable.",
     )
     parser.add_argument(
-        "--calibration",
+        "--calibrated-objects",
         type=Path,
         default=None,
         help=(
-            "Path to a calibration.json (see apps/camera_trap/calibration/fit.py) mapping "
-            "transect_cam to a per-camera linear depth calibration. When given, 'distance' "
-            "is the calibrated value and 'raw_distance'/'calib_method' are also emitted."
+            "Path to a calibrated_objects.csv produced by apps/camera_trap/calibration/apply.py "
+            "(columns: video_name, frame_index, track_id, transect_cam, distance_m, "
+            "raw_depth_at_point, calib_method, align_inlier_frac, homography_used). When given, "
+            "'distance' and 'calib_method' come from the matching row at the sample's grid "
+            "frame, 'raw_depth_at_point' is also emitted, and 'raw_distance' remains the raw "
+            "depth_mask_mean window average. Sampled rows with no matching calibrated-objects "
+            "row, or with calib_method == 'failed', are dropped."
         ),
     )
     parser.add_argument(
@@ -174,7 +182,7 @@ def parse_args() -> argparse.Namespace:
         "--dropped-log",
         type=Path,
         default=None,
-        help="Optional CSV path to write dropped (video_name, track_id, reason) rows for --track-qc drops.",
+        help="Optional CSV path to write dropped (video_name, track_id, reason) rows for --track-qc and --calibrated-objects drops.",
     )
     parser.add_argument(
         "--video-dir",
@@ -324,6 +332,26 @@ def normalize_video_name(name: str) -> str:
     return Path(str(name)).stem.lower()
 
 
+def load_calibrated_objects(path: Path) -> dict[tuple[str, int, str], dict[str, Any]]:
+    """Load a calibration/apply.py calibrated_objects.csv into a lookup keyed by
+    (normalized_video_name, frame_index, track_id_str) -> row dict."""
+    lookup: dict[tuple[str, int, str], dict[str, Any]] = {}
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            video_name = row.get("video_name")
+            frame_index = row.get("frame_index")
+            track_id = row.get("track_id")
+            if not video_name or frame_index is None or track_id is None:
+                continue
+            try:
+                frame_idx_int = int(frame_index)
+            except ValueError:
+                continue
+            lookup[(normalize_video_name(video_name), frame_idx_int, str(track_id))] = row
+    return lookup
+
+
 def load_track_qc(path: Path) -> dict[tuple[str, str], bool]:
     """Load track_qc.csv into a {(normalized_video_name, track_id_str): keep} map."""
     keep_map: dict[tuple[str, str], bool] = {}
@@ -381,7 +409,7 @@ def build_rows_for_video(
     min_bbox_area_frac: float = 0.01,
     iou_dedup_threshold: float = 0.5,
     min_confidence: float = 0.5,
-    calibration: dict[str, Any] | None = None,
+    calibrated_objects: dict[tuple[str, int, str], dict[str, Any]] | None = None,
     track_qc: dict[tuple[str, str], bool] | None = None,
     dropped_log: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -394,9 +422,7 @@ def build_rows_for_video(
         return rows
 
     transect_cam = extract_transect_cam(video_name)
-    apply_calibration = None
-    if calibration is not None:
-        from apps.camera_trap.calibration.fit import apply_calibration  # noqa: F401 (lazy import)
+    norm_video_name_for_calib = normalize_video_name(video_name)
 
     frame_width = int(video_json.get("frame_width") or 0)
     frame_height = int(video_json.get("frame_height") or 0)
@@ -489,9 +515,7 @@ def build_rows_for_video(
         sampled_idx = math.ceil(first_idx / step_frames) * step_frames
         while sampled_idx <= last_idx:
             window_raw_distances: list[float] = []
-            window_distances: list[float] = []
             window_confidences: list[float] = []
-            calib_method = ""
             for frame_idx in range(sampled_idx, sampled_idx + window_frames):
                 if frame_idx not in present_indices:
                     continue
@@ -510,16 +534,40 @@ def build_rows_for_video(
                     continue
                 raw_val = float(distance)
                 window_raw_distances.append(raw_val)
-                if apply_calibration is not None:
-                    calibrated_val, calib_method = apply_calibration(raw_val, transect_cam, calibration)
-                    window_distances.append(calibrated_val)
-                else:
-                    window_distances.append(raw_val)
                 conf = entry.get("confidence")
                 if conf is not None:
                     window_confidences.append(float(conf))
 
-            if window_distances:
+            if window_raw_distances:
+                raw_distance = sum(window_raw_distances) / len(window_raw_distances)
+                distance = raw_distance
+                calib_method = ""
+                raw_depth_at_point: Any = ""
+
+                if calibrated_objects is not None:
+                    # The calibrated-objects lookup is always at the exact grid frame
+                    # (sampled_idx), independent of --window-seconds.
+                    calib_row = calibrated_objects.get(
+                        (norm_video_name_for_calib, sampled_idx, str(track_id))
+                    )
+                    if calib_row is None:
+                        if dropped_log is not None:
+                            dropped_log.append(
+                                {"video_name": video_name, "track_id": track_id, "reason": "calib_missing"}
+                            )
+                        sampled_idx += step_frames
+                        continue
+                    if calib_row.get("calib_method") == "failed":
+                        if dropped_log is not None:
+                            dropped_log.append(
+                                {"video_name": video_name, "track_id": track_id, "reason": "calib_failed"}
+                            )
+                        sampled_idx += step_frames
+                        continue
+                    distance = float(calib_row["distance_m"])
+                    calib_method = calib_row.get("calib_method") or ""
+                    raw_depth_at_point = calib_row.get("raw_depth_at_point", "")
+
                 second = round(sampled_idx / fps_value, 6)
                 detection_datetime = ""
                 if creation_dt is not None:
@@ -535,10 +583,11 @@ def build_rows_for_video(
                         "minute": minute,
                         "second": second,
                         "ind_no": track_id,
-                        "distance": sum(window_distances) / len(window_distances),
+                        "distance": distance,
                         "confidence": sum(window_confidences) / len(window_confidences) if window_confidences else "",
                         "transect_cam": transect_cam or "",
-                        "raw_distance": sum(window_raw_distances) / len(window_raw_distances),
+                        "raw_distance": raw_distance,
+                        "raw_depth_at_point": raw_depth_at_point,
                         "calib_method": calib_method,
                         "detection_datetime": detection_datetime,
                     }
@@ -566,18 +615,18 @@ def main() -> None:
 
     by_name, by_stem = build_video_lookup(REPO_ROOT, video_dir=args.video_dir)
 
-    calibration: dict[str, Any] | None = None
-    if args.calibration is not None:
-        from apps.camera_trap.calibration.fit import load_calibration
-
-        calibration = load_calibration(args.calibration)
+    calibrated_objects: dict[tuple[str, int, str], dict[str, Any]] | None = None
+    if args.calibrated_objects is not None:
+        calibrated_objects = load_calibrated_objects(args.calibrated_objects)
 
     track_qc: dict[tuple[str, str], bool] | None = None
     if args.track_qc is not None:
         track_qc = load_track_qc(args.track_qc)
 
     # Always collected (for the drop-count summary); only written to disk if --dropped-log is given.
-    dropped_log: list[dict[str, Any]] | None = [] if track_qc is not None else None
+    dropped_log: list[dict[str, Any]] | None = (
+        [] if (track_qc is not None or calibrated_objects is not None) else None
+    )
 
     all_rows: list[dict[str, Any]] = []
     skipped_missing_fps = 0
@@ -608,7 +657,7 @@ def main() -> None:
                 min_bbox_area_frac=args.min_bbox_area_frac,
                 iou_dedup_threshold=args.iou_dedup_threshold,
                 min_confidence=args.min_confidence,
-                calibration=calibration,
+                calibrated_objects=calibrated_objects,
                 track_qc=track_qc,
                 dropped_log=dropped_log,
             )
@@ -635,6 +684,12 @@ def main() -> None:
     if track_qc is not None:
         dropped_tracks = len(dropped_log) if dropped_log is not None else "?"
         print(f"track-qc: dropped {dropped_tracks} track(s) flagged keep=False.")
+    if calibrated_objects is not None:
+        dropped_log_rows = dropped_log or []
+        dropped_failed = sum(1 for row in dropped_log_rows if row["reason"] == "calib_failed")
+        dropped_missing = sum(1 for row in dropped_log_rows if row["reason"] == "calib_missing")
+        print(f"dropped {dropped_failed} row(s): failed calib_method")
+        print(f"dropped {dropped_missing} row(s): no calibrated-objects match")
 
 
 if __name__ == "__main__":

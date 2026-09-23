@@ -12,14 +12,14 @@ set -euo pipefail
 # Export per-detection distances CSV from a dap3 job's outputs (JSON only -- no NPZ needed),
 # applying depth calibration and mask-QC track drops. CPU-only.
 #
-#   JOB_DIR=hpc/runs/main_job CALIBRATION=hpc/runs/ref_job/calib/calibration.json \
+#   JOB_DIR=hpc/runs/main_job CALIBRATED_OBJECTS=hpc/runs/main_job/calib_applied/calibrated_objects.csv \
 #     TRACK_QC=hpc/runs/main_job/qc/track_qc.csv OUTPUT_CSV=hpc/runs/main_job/distances.csv \
 #     sbatch hpc/jobs/export_distances.sh
 
 REPO_ROOT="${REPO_ROOT:-$HOME/Unmarked-Anything}"
 JOB_DIR="${JOB_DIR:?Set JOB_DIR to the dap3 output dir to export}"
 OUTPUT_CSV="${OUTPUT_CSV:?Set OUTPUT_CSV to the destination CSV path}"
-CALIBRATION="${CALIBRATION:-}"
+CALIBRATED_OBJECTS="${CALIBRATED_OBJECTS:-}"
 TRACK_QC="${TRACK_QC:-}"
 VIDEO_DIR="${VIDEO_DIR:-}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-2.0}"
@@ -40,8 +40,8 @@ CMD=(
   --interval-seconds "$INTERVAL_SECONDS"
   --window-seconds "$WINDOW_SECONDS"
 )
-if [[ -n "$CALIBRATION" ]]; then
-  CMD+=(--calibration "$CALIBRATION")
+if [[ -n "$CALIBRATED_OBJECTS" ]]; then
+  CMD+=(--calibrated-objects "$CALIBRATED_OBJECTS")
 fi
 if [[ -n "$TRACK_QC" ]]; then
   CMD+=(--track-qc "$TRACK_QC")

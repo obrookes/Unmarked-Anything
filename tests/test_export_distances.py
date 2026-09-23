@@ -91,36 +91,25 @@ def test_no_calibration_distance_equals_raw_distance():
     assert len(rows) == 1
     assert rows[0]["distance"] == pytest.approx(rows[0]["raw_distance"])
     assert rows[0]["calib_method"] == ""
+    assert rows[0]["raw_depth_at_point"] == ""
 
 
-# --- (b) calibration applied (per_camera and unknown -> pooled), raw preserved --------
+# --- (b) calibrated-objects lookup: applied, failed (dropped), missing (dropped) ------
 
 
-def _fake_calibration():
-    return {
-        "49_cam003": {"slope": 2.0, "intercept": 1.0, "method": "per_camera"},
-        "_meta": {"pooled_slope": 1.5, "pooled_intercept": 0.5},
-    }
-
-
-def test_calibration_per_camera_applied(monkeypatch):
-    import apps.camera_trap.calibration.fit as fit_mod
-
-    def fake_apply_calibration(depth, transect_cam, calib):
-        entry = calib.get(transect_cam)
-        if entry is None:
-            meta = calib["_meta"]
-            return meta["pooled_slope"] * depth + meta["pooled_intercept"], "pooled"
-        return entry["slope"] * depth + entry["intercept"], entry["method"]
-
-    monkeypatch.setattr(fit_mod, "apply_calibration", fake_apply_calibration)
-
+def test_calibrated_objects_applied_when_present_and_not_failed():
     video_json = {
-        "video_name": "vids-mission_1_phase_3_pss-E_I-T_49-49_cam03-03080020",
+        "video_name": "clip",
         "video_fps": 1.0,
         "frames": [{"frame_index": 0, "objects": [_entry(depth=10.0)]}],
     }
-    calibration = _fake_calibration()
+    calibrated_objects = {
+        ("clip", 0, "1"): {
+            "distance_m": "12.5",
+            "calib_method": "per_camera",
+            "raw_depth_at_point": "9.9",
+        }
+    }
     rows = export_mod.build_rows_for_video(
         video_json=video_json,
         json_path=Path("clip.json"),
@@ -128,34 +117,30 @@ def test_calibration_per_camera_applied(monkeypatch):
         window_seconds=1.0,
         creation_dt=None,
         apply_filters=False,
-        calibration=calibration,
+        calibrated_objects=calibrated_objects,
     )
     assert len(rows) == 1
     row = rows[0]
     assert row["raw_distance"] == pytest.approx(10.0)
-    assert row["transect_cam"] == "49_cam003"
+    assert row["distance"] == pytest.approx(12.5)
     assert row["calib_method"] == "per_camera"
-    assert row["distance"] == pytest.approx(2.0 * 10.0 + 1.0)
+    assert row["raw_depth_at_point"] == "9.9"
 
 
-def test_calibration_unknown_camera_falls_back_to_pooled(monkeypatch):
-    import apps.camera_trap.calibration.fit as fit_mod
-
-    def fake_apply_calibration(depth, transect_cam, calib):
-        entry = calib.get(transect_cam)
-        if entry is None:
-            meta = calib["_meta"]
-            return meta["pooled_slope"] * depth + meta["pooled_intercept"], "pooled"
-        return entry["slope"] * depth + entry["intercept"], entry["method"]
-
-    monkeypatch.setattr(fit_mod, "apply_calibration", fake_apply_calibration)
-
+def test_calibrated_objects_failed_method_drops_row():
     video_json = {
-        "video_name": "unknown_camera_video",
+        "video_name": "clip",
         "video_fps": 1.0,
         "frames": [{"frame_index": 0, "objects": [_entry(depth=10.0)]}],
     }
-    calibration = _fake_calibration()
+    calibrated_objects = {
+        ("clip", 0, "1"): {
+            "distance_m": "12.5",
+            "calib_method": "failed",
+            "raw_depth_at_point": "9.9",
+        }
+    }
+    dropped_log: list = []
     rows = export_mod.build_rows_for_video(
         video_json=video_json,
         json_path=Path("clip.json"),
@@ -163,13 +148,88 @@ def test_calibration_unknown_camera_falls_back_to_pooled(monkeypatch):
         window_seconds=1.0,
         creation_dt=None,
         apply_filters=False,
-        calibration=calibration,
+        calibrated_objects=calibrated_objects,
+        dropped_log=dropped_log,
+    )
+    assert rows == []
+    assert dropped_log == [{"video_name": "clip", "track_id": 1, "reason": "calib_failed"}]
+
+
+def test_calibrated_objects_no_match_drops_row():
+    video_json = {
+        "video_name": "clip",
+        "video_fps": 1.0,
+        "frames": [{"frame_index": 0, "objects": [_entry(depth=10.0)]}],
+    }
+    calibrated_objects: dict = {}  # no matching row for (clip, 0, "1")
+    dropped_log: list = []
+    rows = export_mod.build_rows_for_video(
+        video_json=video_json,
+        json_path=Path("clip.json"),
+        interval_seconds=1.0,
+        window_seconds=1.0,
+        creation_dt=None,
+        apply_filters=False,
+        calibrated_objects=calibrated_objects,
+        dropped_log=dropped_log,
+    )
+    assert rows == []
+    assert dropped_log == [{"video_name": "clip", "track_id": 1, "reason": "calib_missing"}]
+
+
+def test_load_calibrated_objects_end_to_end(tmp_path: Path):
+    csv_path = tmp_path / "calibrated_objects.csv"
+    with csv_path.open("w", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "video_name",
+                "frame_index",
+                "track_id",
+                "transect_cam",
+                "distance_m",
+                "raw_depth_at_point",
+                "calib_method",
+                "align_inlier_frac",
+                "homography_used",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "video_name": "Clip.MP4",
+                "frame_index": "0",
+                "track_id": "1",
+                "transect_cam": "49_cam003",
+                "distance_m": "12.5",
+                "raw_depth_at_point": "9.9",
+                "calib_method": "per_camera",
+                "align_inlier_frac": "0.9",
+                "homography_used": "True",
+            }
+        )
+    lookup = export_mod.load_calibrated_objects(csv_path)
+    assert ("clip", 0, "1") in lookup
+    assert lookup[("clip", 0, "1")]["distance_m"] == "12.5"
+
+    video_json = {
+        "video_name": "clip",
+        "video_fps": 1.0,
+        "frames": [{"frame_index": 0, "objects": [_entry(depth=10.0)]}],
+    }
+    rows = export_mod.build_rows_for_video(
+        video_json=video_json,
+        json_path=Path("clip.json"),
+        interval_seconds=1.0,
+        window_seconds=1.0,
+        creation_dt=None,
+        apply_filters=False,
+        calibrated_objects=lookup,
     )
     assert len(rows) == 1
-    row = rows[0]
-    assert row["raw_distance"] == pytest.approx(10.0)
-    assert row["calib_method"] == "pooled"
-    assert row["distance"] == pytest.approx(1.5 * 10.0 + 0.5)
+    assert rows[0]["distance"] == pytest.approx(12.5)
+    assert rows[0]["calib_method"] == "per_camera"
+    assert rows[0]["raw_depth_at_point"] == "9.9"
 
 
 # --- (c) track_qc drops keep=False tracks ----------------------------------------------

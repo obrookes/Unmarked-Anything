@@ -62,7 +62,13 @@ From: nvcr.io/nvidia/pytorch:25.06-py3
         pillow_heif \
         safetensors \
         pycocotools \
-        ultralytics
+        ultralytics \
+        scikit-learn \
+        scipy \
+        onnxruntime
+    # scikit-learn/scipy: used by the timmh calibration fitting/alignment code
+    # (apps/camera_trap/calibration/). onnxruntime: optional, only for the LightGlue-based
+    # extrinsic recalibration path.
 
     # Unmarked-Anything itself is bind-mounted at runtime (see hpc/jobs/*.sh, which cd into
     # REPO_ROOT and invoke `python dap3_cli.py ...` directly) rather than pip-installed into the

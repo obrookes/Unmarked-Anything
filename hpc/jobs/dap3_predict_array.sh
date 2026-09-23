@@ -64,6 +64,7 @@ IFS=$'\t' read -r -a F <<< "$LINE"
 # 17 write_npz (optional: 0|1, default 0 — set to 1 to write *_arrays.npz)
 # 18 sam3_backend (optional: official|ultralytics, default official)
 # 19 sam3_det_threshold (optional: float, default 0.5; official backend only)
+# 20 depth_interval_seconds (optional: float, default 2.0 -- DA3 only runs on this wall-clock grid)
 INPUT_VIDEO_DIR="${F[0]:-}"
 SAM3_MODEL_PATH="${F[1]:-}"
 SAM3_TEXT_PROMPTS="${F[2]:-}"
@@ -83,6 +84,7 @@ SAM3_TRACK_TAIL_POLICY="${F[15]:-warn_and_finalize}"
 WRITE_NPZ="${WRITE_NPZ:-${F[16]:-0}}"
 SAM3_BACKEND="${SAM3_BACKEND:-${F[17]:-official}}"
 SAM3_DET_THRESHOLD="${SAM3_DET_THRESHOLD:-${F[18]:-0.5}}"
+DEPTH_INTERVAL_SECONDS="${DEPTH_INTERVAL_SECONDS:-${F[19]:-2.0}}"
 
 if [[ -z "$INPUT_VIDEO_DIR" || -z "$SAM3_MODEL_PATH" || -z "$SAM3_TEXT_PROMPTS" || -z "$DA3_BATCH_SIZE" ]]; then
   echo "Invalid manifest line (missing required fields): $LINE" >&2
@@ -174,7 +176,7 @@ cd "$REPO_ROOT"
 # Container/env selection. The official SAM3 backend needs envs/containers/dap3-sam3.def's
 # newer Python/torch (see that file for why); the ultralytics backend keeps working with the
 # existing conda env. Either CONTAINER (an apptainer .sif) or CONDA_ENV may be set explicitly;
-# if neither is set, default by backend (mirrors hpc/jobs/read_boards.sh's
+# if neither is set, default by backend (mirrors hpc/jobs/apply_calibration.sh's
 # CONTAINER/CONDA_ENV convention).
 CONTAINER="${CONTAINER:-}"
 CONDA_ENV="${CONDA_ENV:-}"
@@ -216,6 +218,7 @@ CMD=(
   --device "$DEVICE"
   --sam3-backend "$SAM3_BACKEND"
   --sam3-det-threshold "$SAM3_DET_THRESHOLD"
+  --depth-interval-seconds "$DEPTH_INTERVAL_SECONDS"
 )
 if [[ "$DA3_MODE" == "stream" ]]; then
   CMD+=(--da3-stream-config "$DA3_STREAM_CONFIG")

@@ -8,7 +8,16 @@ This directory contains cluster-oriented job scripts and helpers for running `da
   - `dap3_predict_ape.sh`: single-job template with sensible defaults.
   - `dap3_predict_array.sh`: array-job script driven by a TSV manifest.
   - `dap3_export_overlays_array.sh`: dependent export job for headless overlay video generation.
-  - `read_boards.sh`: calibration-board VLM reading (+ optional `fit.py` fit) for reference videos.
+  - `find_sign_frames.sh`: sharded VLM array job that scans reference videos for distance-sign
+    frames (`find_sign_frames.py`); the same script also runs as the build-only merge step
+    (`BUILD_ONLY=1`, no `--array`) that combines the shards into the final `calibration_frames.csv`.
+  - `build_reference.sh`: SAM3 person-mask + DA3 depth job (`build_reference.py`) that fits the
+    Haucke et al. 2022 per-camera distance calibration (`calib/<transect_cam>.npz`,
+    `calibration_summary.csv`) from `calibration_frames.csv`.
+  - `apply_calibration.sh`: sharded array job that applies the per-camera calibration to a dap3
+    run's tracked detections (`apply.py`); the same script also runs as the merge step
+    (`MERGE=1`, no `--array`) that combines the shards into `calibrated_objects.csv` +
+    `apply_summary.json`.
   - `mask_verify_array.sh`: sharded mask-QC VLM array job.
   - `export_distances.sh`: CPU job wrapping `export_job_distances_csv.py`.
   - `ctds_abundance.sh`: CPU job wrapping `build_ctds_inputs.py` + `ctds_abundance.R`.
@@ -81,6 +90,8 @@ OUTPUT_ROOT=$HOME/Unmarked-Anything/hpc/runs,USE_SCRATCH=1 \
 17. `write_npz` (optional: `0`/`1`; default `0` — set to `1` to write `*_arrays.npz` alongside the JSON)
 18. `sam3_backend` (optional: `official`/`ultralytics`; default `official`)
 19. `sam3_det_threshold` (optional: float; default `0.5`; only used by the `official` backend)
+20. `depth_interval_seconds` (optional: float; default `2` — DA3 depth is computed on this time
+    grid per video rather than every frame; passed through to `dap3_cli.py --depth-interval-seconds`)
 
 Notes:
 - Comment lines start with `#`.
@@ -92,7 +103,7 @@ Notes:
 - `da3_batch_size` is passed through directly to the CLI and must be a positive integer.
 - `da3_mode=stream` runs in-memory DA3-Streaming on all sampled frames and requires a valid `da3_stream_config`.
 - `da3_mode=all_frames` runs standard DA3 on all sampled frames in memory; output persistence remains SAM-positive (`processed`) frames.
-- By default only the JSON output is written. Set `write_npz=1` in the manifest (or pass `--npz` directly) to also write `*_arrays.npz`. The NPZ is required by downstream tools such as `mask_verify.py` (mask QC), `read_boards.py` (calibration board reading), `validate_mask_rle_roundtrip.py`, and the overlay export workflow. It is NOT needed by `export_job_distances_csv.py`, which reads the per-video JSON only.
+- By default only the JSON output is written. Set `write_npz=1` in the manifest (or pass `--npz` directly) to also write `*_arrays.npz` (depth stored float16 at native resolution). The NPZ is required by downstream tools such as `mask_verify.py` (mask QC), `apply.py` (distance calibration alignment), `validate_mask_rle_roundtrip.py`, and the overlay export workflow. It is NOT needed by `export_job_distances_csv.py`, which reads the per-video JSON (plus `calibrated_objects.csv`/`track_qc.csv`) only.
 - Mask persistence defaults to RLE-only. Use `--mask-storage-format both` only for validation runs where you need paired raw+RLE artifacts.
 - `sam3_track_isolation` and `sam3_track_tail_policy` are only relevant when `sam3_mode=track`.
 - `sam3_backend`/`sam3_det_threshold` are trailing columns; manifests written before they existed
