@@ -258,9 +258,11 @@ def process_video(
 def _process_pooled_frame(video_name, frame_idx, objs, masks_native, depth_raw, pooled, transect_cam, failures) -> list[dict[str, Any]]:
     disp = disparity_from_depth(depth_raw)
     depth_cal = depth_from_disparity(pooled["curve"](disp), pooled["min_depth"], pooled["max_depth"])
+    depth_shape = depth_raw.shape[:2]
     rows = []
     for obj, mask in zip(objs, masks_native):
-        pt = interior_point(mask)
+        # Masks are stored at native video resolution; depth is at DA3's (smaller) resolution.
+        pt = interior_point(resize_to(mask.astype(bool), depth_shape))
         if pt is None:
             failures["empty_mask"] += 1
             rows.append(_row(video_name, frame_idx, obj, transect_cam, float("nan"), float("nan"), "failed", None, False))

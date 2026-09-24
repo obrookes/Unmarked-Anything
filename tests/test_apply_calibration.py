@@ -510,3 +510,37 @@ def test_resume_skips_already_done_video(tmp_path: Path):
     assert code == 0
     rows_overwrite = _read_csv_rows(out_dir / "calibrated_objects.csv")
     assert len(rows_overwrite) == 1
+
+
+def test_pooled_path_native_mask_larger_than_depth(tmp_path: Path):
+    # Real jobs store masks at native video resolution and depth at DA3's smaller resolution; the
+    # pooled path must sample depth at the mask's interior point rescaled to the depth grid.
+    calib_dir = tmp_path / "calib"
+    _write_pooled_calib(calib_dir)
+
+    known_distance = 6.0
+    small_h, small_w = H // 2, W // 2
+    depth_small = np.full((small_h, small_w), 100.0, dtype=np.float32)
+    depth_small[small_h // 2 - 3 : small_h // 2 + 3, small_w // 2 - 3 : small_w // 2 + 3] = known_distance
+    mask_native = _blob_mask(H // 2, W // 2)  # full-resolution mask centred on the same object
+
+    job_dir = tmp_path / "job"
+    video_dir = job_dir / "no_cam_pattern_video"
+    video_dir.mkdir(parents=True)
+    npz_arrays = {"f0_depth": depth_small}
+    entry = build_mask_storage_entry(
+        npz_arrays=npz_arrays, key_prefix="f0_obj_0_mask", mask=mask_native,
+        base_entry={"object_index": 0, "track_id": 1, "bbox_xyxy": [0, 0, W, H]},
+        storage_format="raw",
+    )
+    frame = {"frame_index": 0, "status": "processed", "objects": [entry], "npz_keys": {"depth": "f0_depth"}}
+    video_json = {"video_name": "no_cam_pattern_video", "video_path": None, "frames": [frame]}
+    (video_dir / "no_cam_pattern_video.json").write_text(json.dumps(video_json))
+    np.savez(video_dir / "no_cam_pattern_video_arrays.npz", **npz_arrays)
+
+    out_dir = tmp_path / "out"
+    code = applymod.main(["--job-dir", str(job_dir), "--calib-dir", str(calib_dir), "--out-dir", str(out_dir)])
+    assert code == 0
+    rows = _read_csv_rows(out_dir / "calibrated_objects.csv")
+    assert rows[0]["calib_method"] == "pooled"
+    assert float(rows[0]["distance_m"]) == pytest.approx(known_distance, abs=1e-3)
